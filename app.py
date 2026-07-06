@@ -12,7 +12,7 @@ import streamlit as st
 
 
 # =============================================================================
-# Convex Asset Trader Experience Board v17 - Streamlit Web MVP v3.4
+# Convex Asset Trader Experience Board v17 - Streamlit Web MVP v3.5
 # =============================================================================
 # Purpose:
 #   Web-app MVP for the PyCharm / Excel v17 trader board.
@@ -54,7 +54,7 @@ import streamlit as st
 # =============================================================================
 
 st.set_page_config(
-    page_title="v17 Trader Board Web MVP v3.4",
+    page_title="v17 Trader Board Web MVP v3.5",
     page_icon="⚡",
     layout="wide",
 )
@@ -81,6 +81,14 @@ PLOTLY_CONFIG = {
 # Requested DA revenue colors.
 DA_POSITIVE_COLOR = "rgba(255, 183, 77, 0.75)"   # light orange
 DA_NEGATIVE_COLOR = "rgba(144, 202, 249, 0.75)"  # light blue
+
+# DA-only mode: show the no-correction imbalance settlement in light green.
+DA_ONLY_IMBALANCE_POSITIVE_COLOR = "rgba(129, 199, 132, 0.72)"  # light green
+DA_ONLY_IMBALANCE_NEGATIVE_COLOR = "rgba(165, 214, 167, 0.72)"  # pale green
+DEFAULT_IMBALANCE_POSITIVE_COLOR = "rgba(255, 45, 45, 0.88)"   # red
+DEFAULT_IMBALANCE_NEGATIVE_COLOR = "rgba(255, 160, 160, 0.75)"  # pale red
+ID_POSITIVE_COLOR = "rgba(0, 102, 204, 0.95)"                  # blue
+ID_NEGATIVE_COLOR = "rgba(144, 202, 249, 0.85)"                # light blue
 
 
 @dataclass(frozen=True)
@@ -926,6 +934,7 @@ def run_simulation(
     v5_imbalance_base: pd.Series,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, float]]:
     df = input_df.copy()
+    df["strategy_mode"] = strategy_mode
 
     da_factor = da_sold_pct / 100.0
     allow_id = strategy_mode == "DA + ID Correction"
@@ -1084,13 +1093,29 @@ def make_id_imbalance_chart(df: pd.DataFrame) -> go.Figure:
     total = df["id_revenue_eur"] + df["imbalance_settlement_eur"]
     y_min, y_max = nice_axis_limits(pd.concat([id_pos, id_neg, imb_pos, imb_neg, total]))
 
+    strategy_mode = str(df["strategy_mode"].iloc[0]) if "strategy_mode" in df.columns and not df.empty else ""
+    is_da_only = strategy_mode == "DA Only"
+
+    if is_da_only:
+        positive_imbalance_name = "Positive Imbalance Settlement EUR"
+        negative_imbalance_name = "Negative Imbalance Settlement EUR"
+        positive_imbalance_color = DA_ONLY_IMBALANCE_POSITIVE_COLOR
+        negative_imbalance_color = DA_ONLY_IMBALANCE_NEGATIVE_COLOR
+        chart_title = "DA-only Imbalance Settlement EUR - 5-min"
+    else:
+        positive_imbalance_name = "Positive residual imbalance PnL"
+        negative_imbalance_name = "Negative residual imbalance PnL"
+        positive_imbalance_color = DEFAULT_IMBALANCE_POSITIVE_COLOR
+        negative_imbalance_color = DEFAULT_IMBALANCE_NEGATIVE_COLOR
+        chart_title = "ID Revenue / Residual Imbalance PnL - 5-min"
+
     fig = go.Figure()
-    fig.add_bar(x=df["time_label"], y=id_pos, name="Positive ID contribution")
-    fig.add_bar(x=df["time_label"], y=id_neg, name="Negative ID contribution")
-    fig.add_bar(x=df["time_label"], y=imb_pos, name="Positive residual imbalance PnL")
-    fig.add_bar(x=df["time_label"], y=imb_neg, name="Negative residual imbalance PnL")
+    fig.add_bar(x=df["time_label"], y=id_pos, name="Positive ID contribution", marker_color=ID_POSITIVE_COLOR)
+    fig.add_bar(x=df["time_label"], y=id_neg, name="Negative ID contribution", marker_color=ID_NEGATIVE_COLOR)
+    fig.add_bar(x=df["time_label"], y=imb_pos, name=positive_imbalance_name, marker_color=positive_imbalance_color)
+    fig.add_bar(x=df["time_label"], y=imb_neg, name=negative_imbalance_name, marker_color=negative_imbalance_color)
     fig.update_layout(
-        title="ID Revenue / Residual Imbalance PnL - 5-min",
+        title=chart_title,
         dragmode=False,
         barmode="relative",
         height=500,
@@ -1100,7 +1125,6 @@ def make_id_imbalance_chart(df: pd.DataFrame) -> go.Figure:
         yaxis=dict(range=[y_min, y_max], title="EUR per 5-min interval"),
     )
     return fig
-
 
 def make_auction_chart(auction_breakdown_df: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
@@ -1209,7 +1233,7 @@ def auction_display_table(auction_breakdown_df: pd.DataFrame) -> pd.DataFrame:
 # UI
 # =============================================================================
 
-st.title("⚡ Convex Asset Trader Experience Board v17 - Web MVP v3.4")
+st.title("⚡ Convex Asset Trader Experience Board v17 - Web MVP v3.5")
 st.caption(
     "Streamlit version of the v17 trader board concept. "
     "Uses v3/v4/v5 and optional raw EPEX vintage files. v16 files are not used."
@@ -1509,12 +1533,12 @@ with tab6:
     st.download_button(
         label="Download calculated result as Excel",
         data=excel_bytes,
-        file_name="v17_streamlit_mvp_v3_4_result.xlsx",
+        file_name="v17_streamlit_mvp_v3_5_result.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
     st.download_button(
         label="Download settlement table as CSV",
         data=settlement_df.to_csv(index=False).encode("utf-8-sig"),
-        file_name="v17_streamlit_mvp_v3_4_settlement.csv",
+        file_name="v17_streamlit_mvp_v3_5_settlement.csv",
         mime="text/csv",
     )
