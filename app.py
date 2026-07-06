@@ -12,7 +12,7 @@ import streamlit as st
 
 
 # =============================================================================
-# Convex Asset Trader Experience Board v17 - Streamlit Web MVP v3.2.1
+# Convex Asset Trader Experience Board v17 - Streamlit Web MVP v3.3
 # =============================================================================
 # Purpose:
 #   Web-app MVP for the PyCharm / Excel v17 trader board.
@@ -39,6 +39,12 @@ import streamlit as st
 #   - Imbalance wording is shown as Imbalance PnL in the UI.
 #   - Cumulative chart spacing is adjusted to avoid title / legend overlap.
 #
+# Main fixes in v3.3:
+#   - Plotly accidental box-zoom / drag-zoom is disabled for all charts.
+#   - Plotly modebar removes zoom / pan / select / lasso controls.
+#   - DA positive revenue uses a light orange color.
+#   - DA negative revenue uses a light blue color.
+#
 # Required:
 #   - v3_da_revenue_YYYY_MM_DD.csv
 # Optional:
@@ -48,10 +54,33 @@ import streamlit as st
 # =============================================================================
 
 st.set_page_config(
-    page_title="v17 Trader Board Web MVP v3.2",
+    page_title="v17 Trader Board Web MVP v3.3",
     page_icon="⚡",
     layout="wide",
 )
+
+# =============================================================================
+# Chart interaction and color settings
+# =============================================================================
+# Prevent accidental click-drag zoom behavior in Plotly charts.
+PLOTLY_CONFIG = {
+    "displayModeBar": True,
+    "scrollZoom": False,
+    "displaylogo": False,
+    "modeBarButtonsToRemove": [
+        "zoom2d",
+        "pan2d",
+        "select2d",
+        "lasso2d",
+        "zoomIn2d",
+        "zoomOut2d",
+        "autoScale2d",
+    ],
+}
+
+# Requested DA revenue colors.
+DA_POSITIVE_COLOR = "rgba(255, 183, 77, 0.75)"   # light orange
+DA_NEGATIVE_COLOR = "rgba(144, 202, 249, 0.75)"  # light blue
 
 
 @dataclass(frozen=True)
@@ -903,10 +932,11 @@ def make_da_chart(df: pd.DataFrame) -> go.Figure:
     y_min, y_max = nice_axis_limits(df["da_revenue_eur"])
 
     fig = go.Figure()
-    fig.add_bar(x=df["time_label"], y=pos, name="Positive DA Revenue EUR")
-    fig.add_bar(x=df["time_label"], y=neg, name="Negative DA Revenue EUR")
+    fig.add_bar(x=df["time_label"], y=pos, name="Positive DA Revenue EUR", marker_color=DA_POSITIVE_COLOR)
+    fig.add_bar(x=df["time_label"], y=neg, name="Negative DA Revenue EUR", marker_color=DA_NEGATIVE_COLOR)
     fig.update_layout(
         title="DA Revenue EUR - 5-min contribution",
+        dragmode=False,
         barmode="relative",
         height=430,
         margin=dict(l=40, r=20, t=60, b=80),
@@ -932,6 +962,7 @@ def make_id_imbalance_chart(df: pd.DataFrame) -> go.Figure:
     fig.add_bar(x=df["time_label"], y=imb_neg, name="Negative residual imbalance PnL")
     fig.update_layout(
         title="ID Revenue / Residual Imbalance PnL - 5-min",
+        dragmode=False,
         barmode="relative",
         height=500,
         margin=dict(l=40, r=20, t=90, b=80),
@@ -945,7 +976,7 @@ def make_id_imbalance_chart(df: pd.DataFrame) -> go.Figure:
 def make_auction_chart(auction_breakdown_df: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
     if auction_breakdown_df.empty:
-        fig.update_layout(height=420, margin=dict(l=45, r=20, t=30, b=70))
+        fig.update_layout(height=420, dragmode=False, margin=dict(l=45, r=20, t=30, b=70))
         return fig
 
     fig.add_bar(
@@ -955,6 +986,7 @@ def make_auction_chart(auction_breakdown_df: pd.DataFrame) -> go.Figure:
     )
     fig.update_layout(
         height=420,
+        dragmode=False,
         margin=dict(l=55, r=20, t=35, b=70),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0.0),
         yaxis=dict(title="EUR"),
@@ -970,6 +1002,7 @@ def make_cumulative_chart(df: pd.DataFrame) -> go.Figure:
     fig.add_scatter(x=df["time_label"], y=df["total_revenue_eur"].cumsum(), mode="lines", name="Total")
     fig.update_layout(
         height=420,
+        dragmode=False,
         margin=dict(l=55, r=25, t=45, b=80),
         legend=dict(orientation="h", yanchor="bottom", y=1.04, xanchor="left", x=0.0),
         xaxis=dict(tickmode="array", tickvals=df["time_label"].iloc[::12], tickangle=-45),
@@ -1047,7 +1080,7 @@ def auction_display_table(auction_breakdown_df: pd.DataFrame) -> pd.DataFrame:
 # UI
 # =============================================================================
 
-st.title("⚡ Convex Asset Trader Experience Board v17 - Web MVP v3.2")
+st.title("⚡ Convex Asset Trader Experience Board v17 - Web MVP v3.3")
 st.caption(
     "Streamlit version of the v17 trader board concept. "
     "Uses v3/v4/v5 and optional raw EPEX vintage files. v16 files are not used."
@@ -1232,15 +1265,15 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
 )
 
 with tab1:
-    st.plotly_chart(make_da_chart(settlement_df), use_container_width=True)
-    st.plotly_chart(make_id_imbalance_chart(settlement_df), use_container_width=True)
+    st.plotly_chart(make_da_chart(settlement_df), use_container_width=True, config=PLOTLY_CONFIG)
+    st.plotly_chart(make_id_imbalance_chart(settlement_df), use_container_width=True, config=PLOTLY_CONFIG)
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("#### ID Revenue by Auction Window")
-        st.plotly_chart(make_auction_chart(auction_breakdown_df), use_container_width=True)
+        st.plotly_chart(make_auction_chart(auction_breakdown_df), use_container_width=True, config=PLOTLY_CONFIG)
     with c2:
         st.markdown("#### Cumulative Revenue Components")
-        st.plotly_chart(make_cumulative_chart(settlement_df), use_container_width=True)
+        st.plotly_chart(make_cumulative_chart(settlement_df), use_container_width=True, config=PLOTLY_CONFIG)
 
 with tab2:
     c1, c2 = st.columns([0.8, 1.2])
@@ -1334,12 +1367,12 @@ with tab6:
     st.download_button(
         label="Download calculated result as Excel",
         data=excel_bytes,
-        file_name="v17_streamlit_mvp_v3_2_result.xlsx",
+        file_name="v17_streamlit_mvp_v3_3_result.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
     st.download_button(
         label="Download settlement table as CSV",
         data=settlement_df.to_csv(index=False).encode("utf-8-sig"),
-        file_name="v17_streamlit_mvp_v3_2_settlement.csv",
+        file_name="v17_streamlit_mvp_v3_3_settlement.csv",
         mime="text/csv",
     )
