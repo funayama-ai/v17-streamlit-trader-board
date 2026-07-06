@@ -13,7 +13,7 @@ import streamlit as st
 
 
 # =============================================================================
-# Convex Asset Trader Experience Board v17 - Streamlit Web MVP v3.7
+# Convex Asset Trader Experience Board v17 - Streamlit Web MVP v3.8
 # =============================================================================
 # Purpose:
 #   Web-app MVP for the PyCharm / Excel v17 trader board.
@@ -53,6 +53,11 @@ import streamlit as st
 #   - DA Only mode shows positive / negative Imbalance Settlement EUR in the second graph.
 #   - The third graph is restored to ID Revenue by Auction Window.
 #
+# Main fixes in v3.8:
+#   - DA + ID Correction logic now keeps explicit no-ID imbalance settlement.
+#   - Residual imbalance settlement is calculated from the residual imbalance ratio.
+#   - Strategy Result Waterfall is added for Excel v17-style comparison.
+#
 # Required:
 #   - v3_da_revenue_YYYY_MM_DD.csv
 # Optional:
@@ -62,7 +67,7 @@ import streamlit as st
 # =============================================================================
 
 st.set_page_config(
-    page_title="v17 Trader Board Web MVP v3.7",
+    page_title="v17 Trader Board Web MVP v3.8",
     page_icon="⚡",
     layout="wide",
 )
@@ -1094,21 +1099,36 @@ def run_simulation(
     df["remaining_imbalance_mwh"] = df["strategy_error_mwh"] - df["total_id_trade_mwh"]
     df["remaining_imbalance_abs_mwh"] = df["remaining_imbalance_mwh"].abs()
 
+    # Explicit no-ID imbalance settlement benchmark.
+    # This is important for explaining the Excel v17 logic:
+    #   DA-only / no-correction revenue = DA revenue + no-ID imbalance settlement.
     if use_uploaded_v5:
-        # v5 is the no-correction imbalance benchmark.
-        # Residual imbalance is approximated by the non-captured share.
-        df["imbalance_settlement_eur"] = v5_imbalance_base.reindex(df.index).fillna(0.0).astype(float) * da_factor * (1.0 - capture_factor)
-        df["imbalance_source"] = "uploaded_v5_scaled_by_da_position_and_remaining_capture"
+        df["no_id_imbalance_settlement_eur"] = (
+            v5_imbalance_base.reindex(df.index).fillna(0.0).astype(float) * da_factor
+        )
+    else:
+        df["no_id_imbalance_settlement_eur"] = df["strategy_error_mwh"] * df["imbalance_price_eur_per_mwh"]
+
+    # Residual imbalance ratio after ID correction.
+    # If no ID correction is active, this ratio is 1.0.
+    # If an interval is fully captured, this ratio approaches 0.0.
+    safe_strategy_error = df["strategy_error_mwh"].where(df["strategy_error_mwh"].abs() > 1e-9)
+    residual_ratio = (df["remaining_imbalance_mwh"] / safe_strategy_error).replace([np.inf, -np.inf], np.nan)
+    residual_ratio = residual_ratio.fillna(1.0 if not allow_id else 0.0).clip(lower=-2.0, upper=2.0)
+    df["residual_imbalance_ratio"] = residual_ratio
+
+    if use_uploaded_v5:
+        # v5 is the no-correction imbalance benchmark after conversion.
+        # Residual imbalance settlement is scaled by the residual volume ratio,
+        # not by total no-correction PnL. This keeps DA-only and DA+ID cases separate.
+        df["imbalance_settlement_eur"] = df["no_id_imbalance_settlement_eur"] * df["residual_imbalance_ratio"]
+        df["imbalance_source"] = "uploaded_v5_scaled_by_residual_imbalance_ratio"
     else:
         df["imbalance_settlement_eur"] = df["remaining_imbalance_mwh"] * df["imbalance_price_eur_per_mwh"]
         df["imbalance_source"] = "model_remaining_mwh_times_imbalance_price"
 
     df["total_revenue_eur"] = df["da_revenue_eur"] + df["id_revenue_eur"] + df["imbalance_settlement_eur"]
-
-    if v5_imbalance_base.abs().sum() > 0:
-        df["no_id_benchmark_eur"] = df["da_revenue_eur"] + v5_imbalance_base.reindex(df.index).fillna(0.0).astype(float) * da_factor
-    else:
-        df["no_id_benchmark_eur"] = df["da_revenue_eur"] + df["strategy_error_mwh"] * df["imbalance_price_eur_per_mwh"]
+    df["no_id_benchmark_eur"] = df["da_revenue_eur"] + df["no_id_imbalance_settlement_eur"]
 
     df["id_strategy_value_eur"] = df["total_revenue_eur"] - df["no_id_benchmark_eur"]
     df["id_plus_imbalance_eur"] = df["id_revenue_eur"] + df["imbalance_settlement_eur"]
@@ -1121,6 +1141,7 @@ def run_simulation(
         "Imbalance Settlement EUR": float(df["imbalance_settlement_eur"].sum()),
         "Total revenue EUR": float(df["total_revenue_eur"].sum()),
         "No-ID benchmark EUR": float(df["no_id_benchmark_eur"].sum()),
+        "No-ID imbalance settlement EUR": float(df["no_id_imbalance_settlement_eur"].sum()),
         "ID strategy value EUR": float(df["id_strategy_value_eur"].sum()),
         "Original forecast error MWh": float(df["forecast_error_mwh"].sum()),
         "Original absolute forecast error MWh": float(df["forecast_error_mwh"].abs().sum()),
@@ -1323,6 +1344,70 @@ def make_cumulative_chart(df: pd.DataFrame) -> go.Figure:
     return fig
 
 
+
+
+def make_strategy_waterfall_chart(df: pd.DataFrame, kpi: Dict[str, float]) -> go.Figure:
+    """Excel v17-style bridge from DA-only benchmark to ID-correction result."""
+    da_revenue = float(kpi.get("DA revenue EUR", 0.0))
+    no_id_imbalance = float(kpi.get("No-ID imbalance settlement EUR", 0.0))
+    no_id_total = float(kpi.get("No-ID benchmark EUR", 0.0))
+    id_revenue = float(kpi.get("ID revenue EUR", 0.0))
+    residual_imbalance = float(kpi.get("Imbalance Settlement EUR", 0.0))
+    id_case_total = float(kpi.get("Total revenue EUR", 0.0))
+    strategy_value = float(kpi.get("ID strategy value EUR", 0.0))
+
+    fig = go.Figure(
+        go.Waterfall(
+            name="Strategy bridge",
+            orientation="v",
+            measure=["relative", "relative", "total", "relative", "relative", "total"],
+            x=[
+                "DA Revenue",
+                "No-ID Imbalance",
+                "DA-only Benchmark",
+                "ID Revenue",
+                "Residual Imbalance",
+                "ID-Correction Total",
+            ],
+            y=[da_revenue, no_id_imbalance, no_id_total, id_revenue, residual_imbalance, id_case_total],
+            connector={"line": {"width": 1}},
+            text=[
+                fmt_eur(da_revenue),
+                fmt_eur(no_id_imbalance),
+                fmt_eur(no_id_total),
+                fmt_eur(id_revenue),
+                fmt_eur(residual_imbalance),
+                fmt_eur(id_case_total),
+            ],
+            textposition="outside",
+        )
+    )
+    fig.update_layout(
+        title=f"Strategy Result Waterfall | ID strategy value: {strategy_value:,.0f} EUR",
+        dragmode=False,
+        height=430,
+        margin=dict(l=55, r=25, t=85, b=85),
+        yaxis=dict(title="EUR"),
+    )
+    return fig
+
+
+def make_case_comparison_table(kpi: Dict[str, float]) -> pd.DataFrame:
+    da_revenue = float(kpi.get("DA revenue EUR", 0.0))
+    no_id_imbalance = float(kpi.get("No-ID imbalance settlement EUR", 0.0))
+    no_id_total = float(kpi.get("No-ID benchmark EUR", 0.0))
+    id_revenue = float(kpi.get("ID revenue EUR", 0.0))
+    residual_imbalance = float(kpi.get("Imbalance Settlement EUR", 0.0))
+    id_case_total = float(kpi.get("Total revenue EUR", 0.0))
+    return pd.DataFrame(
+        [
+            {"case": "DA Only / No ID", "DA revenue EUR": da_revenue, "ID revenue EUR": 0.0, "Imbalance Settlement EUR": no_id_imbalance, "Total revenue EUR": no_id_total},
+            {"case": "DA + ID Correction", "DA revenue EUR": da_revenue, "ID revenue EUR": id_revenue, "Imbalance Settlement EUR": residual_imbalance, "Total revenue EUR": id_case_total},
+            {"case": "ID strategy value", "DA revenue EUR": 0.0, "ID revenue EUR": id_revenue, "Imbalance Settlement EUR": residual_imbalance - no_id_imbalance, "Total revenue EUR": id_case_total - no_id_total},
+        ]
+    )
+
+
 def make_excel_download(
     input_df: pd.DataFrame,
     settlement_df: pd.DataFrame,
@@ -1392,7 +1477,7 @@ def auction_display_table(auction_breakdown_df: pd.DataFrame) -> pd.DataFrame:
 # UI
 # =============================================================================
 
-st.title("⚡ Convex Asset Trader Experience Board v17 - Web MVP v3.7")
+st.title("⚡ Convex Asset Trader Experience Board v17 - Web MVP v3.8")
 st.caption(
     "Streamlit version of the v17 trader board concept. "
     "Uses v3/v4/v5 and optional raw EPEX vintage files. v16 files are not used."
@@ -1510,6 +1595,12 @@ source_rows = [
         "status": v5_info.get("source_type", "ok") if v5_info.get("selected_column") not in ["not uploaded", "not detected"] else str(v5_info.get("selected_column")),
         "selected_column": v5_info.get("selected_column"),
         "sum": v5_info.get("sum", 0.0),
+    },
+    {
+        "item": "No-ID imbalance settlement EUR",
+        "status": "explicit benchmark used for DA-only comparison",
+        "selected_column": "no_id_imbalance_settlement_eur",
+        "sum": kpi.get("No-ID imbalance settlement EUR", 0.0),
     },
     {
         "item": "ID3 Benchmark Price",
@@ -1630,12 +1721,18 @@ with tab2:
     st.markdown("#### Auction Breakdown")
     st.dataframe(auction_display_table(auction_breakdown_df), use_container_width=True, hide_index=True)
 
+    st.markdown("#### DA-only vs DA + ID Correction")
+    st.dataframe(make_case_comparison_table(kpi), use_container_width=True, hide_index=True)
+    st.plotly_chart(make_strategy_waterfall_chart(settlement_df, kpi), use_container_width=True, config=PLOTLY_CONFIG)
+
 with tab3:
     display_cols = [
         "time_label",
         "da_revenue_eur",
         "id_revenue_eur",
+        "no_id_imbalance_settlement_eur",
         "imbalance_settlement_eur",
+        "residual_imbalance_ratio",
         "id_plus_imbalance_eur",
         "total_revenue_eur",
         "forecast_error_mwh",
@@ -1698,12 +1795,12 @@ with tab6:
     st.download_button(
         label="Download calculated result as Excel",
         data=excel_bytes,
-        file_name="v17_streamlit_mvp_v3_7_result.xlsx",
+        file_name="v17_streamlit_mvp_v3_8_result.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
     st.download_button(
         label="Download settlement table as CSV",
         data=settlement_df.to_csv(index=False).encode("utf-8-sig"),
-        file_name="v17_streamlit_mvp_v3_7_settlement.csv",
+        file_name="v17_streamlit_mvp_v3_8_settlement.csv",
         mime="text/csv",
     )
