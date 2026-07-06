@@ -12,7 +12,7 @@ import streamlit as st
 
 
 # =============================================================================
-# Convex Asset Trader Experience Board v17 - Streamlit Web MVP v3.1.1
+# Convex Asset Trader Experience Board v17 - Streamlit Web MVP v3.2.1
 # =============================================================================
 # Purpose:
 #   Web-app MVP for the PyCharm / Excel v17 trader board.
@@ -48,7 +48,7 @@ import streamlit as st
 # =============================================================================
 
 st.set_page_config(
-    page_title="v17 Trader Board Web MVP v3.1",
+    page_title="v17 Trader Board Web MVP v3.2",
     page_icon="⚡",
     layout="wide",
 )
@@ -945,6 +945,7 @@ def make_id_imbalance_chart(df: pd.DataFrame) -> go.Figure:
 def make_auction_chart(auction_breakdown_df: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
     if auction_breakdown_df.empty:
+        fig.update_layout(height=420, margin=dict(l=45, r=20, t=30, b=70))
         return fig
 
     fig.add_bar(
@@ -953,9 +954,9 @@ def make_auction_chart(auction_breakdown_df: pd.DataFrame) -> go.Figure:
         name="ID revenue EUR",
     )
     fig.update_layout(
-        title="ID Revenue by Auction Window",
-        height=360,
-        margin=dict(l=40, r=20, t=60, b=60),
+        height=420,
+        margin=dict(l=55, r=20, t=35, b=70),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0.0),
         yaxis=dict(title="EUR"),
     )
     return fig
@@ -963,15 +964,14 @@ def make_auction_chart(auction_breakdown_df: pd.DataFrame) -> go.Figure:
 
 def make_cumulative_chart(df: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
-    fig.add_scatter(x=df["time_label"], y=df["da_revenue_eur"].cumsum(), mode="lines", name="Cumulative DA")
-    fig.add_scatter(x=df["time_label"], y=df["id_revenue_eur"].cumsum(), mode="lines", name="Cumulative ID")
-    fig.add_scatter(x=df["time_label"], y=df["imbalance_settlement_eur"].cumsum(), mode="lines", name="Cumulative imbalance PnL")
-    fig.add_scatter(x=df["time_label"], y=df["total_revenue_eur"].cumsum(), mode="lines", name="Cumulative total")
+    fig.add_scatter(x=df["time_label"], y=df["da_revenue_eur"].cumsum(), mode="lines", name="DA")
+    fig.add_scatter(x=df["time_label"], y=df["id_revenue_eur"].cumsum(), mode="lines", name="ID")
+    fig.add_scatter(x=df["time_label"], y=df["imbalance_settlement_eur"].cumsum(), mode="lines", name="Imbalance PnL")
+    fig.add_scatter(x=df["time_label"], y=df["total_revenue_eur"].cumsum(), mode="lines", name="Total")
     fig.update_layout(
-        title=dict(text="Cumulative Revenue Components", x=0.02, xanchor="left"),
-        height=430,
-        margin=dict(l=45, r=25, t=105, b=80),
-        legend=dict(orientation="h", yanchor="bottom", y=1.18, xanchor="left", x=0.0),
+        height=420,
+        margin=dict(l=55, r=25, t=45, b=80),
+        legend=dict(orientation="h", yanchor="bottom", y=1.04, xanchor="left", x=0.0),
         xaxis=dict(tickmode="array", tickvals=df["time_label"].iloc[::12], tickangle=-45),
         yaxis=dict(title="EUR"),
     )
@@ -1047,7 +1047,7 @@ def auction_display_table(auction_breakdown_df: pd.DataFrame) -> pd.DataFrame:
 # UI
 # =============================================================================
 
-st.title("⚡ Convex Asset Trader Experience Board v17 - Web MVP v3.1")
+st.title("⚡ Convex Asset Trader Experience Board v17 - Web MVP v3.2")
 st.caption(
     "Streamlit version of the v17 trader board concept. "
     "Uses v3/v4/v5 and optional raw EPEX vintage files. v16 files are not used."
@@ -1212,6 +1212,11 @@ with left:
 with right:
     st.markdown("### Auction Settings / Results")
     st.dataframe(auction_display_table(auction_breakdown_df), use_container_width=True, hide_index=True)
+    if epex_info_df.empty:
+        st.caption(
+            "Raw EPEX vintage price files are not loaded. Auction average prices are shown as 'not loaded', "
+            "and executed ID trade MWh is shown as an approximate volume based on forecast-error exposure × capture %."
+        )
 
 st.divider()
 
@@ -1231,8 +1236,10 @@ with tab1:
     st.plotly_chart(make_id_imbalance_chart(settlement_df), use_container_width=True)
     c1, c2 = st.columns(2)
     with c1:
+        st.markdown("#### ID Revenue by Auction Window")
         st.plotly_chart(make_auction_chart(auction_breakdown_df), use_container_width=True)
     with c2:
+        st.markdown("#### Cumulative Revenue Components")
         st.plotly_chart(make_cumulative_chart(settlement_df), use_container_width=True)
 
 with tab2:
@@ -1327,12 +1334,12 @@ with tab6:
     st.download_button(
         label="Download calculated result as Excel",
         data=excel_bytes,
-        file_name="v17_streamlit_mvp_v3_1_result.xlsx",
+        file_name="v17_streamlit_mvp_v3_2_result.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
     st.download_button(
         label="Download settlement table as CSV",
         data=settlement_df.to_csv(index=False).encode("utf-8-sig"),
-        file_name="v17_streamlit_mvp_v3_1_settlement.csv",
+        file_name="v17_streamlit_mvp_v3_2_settlement.csv",
         mime="text/csv",
     )
