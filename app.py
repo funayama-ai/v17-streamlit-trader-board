@@ -12,7 +12,7 @@ import streamlit as st
 
 
 # =============================================================================
-# Convex Asset Trader Experience Board v17 - Streamlit Web MVP v3
+# Convex Asset Trader Experience Board v17 - Streamlit Web MVP v3.1.1
 # =============================================================================
 # Purpose:
 #   Web-app MVP for the PyCharm / Excel v17 trader board.
@@ -32,6 +32,13 @@ import streamlit as st
 #   - ID auction breakdown table and chart.
 #   - Excel / CSV download of calculated web results.
 #
+# Main fixes in v3.1:
+#   - Executed ID Trade MWh no longer becomes 0 just because raw EPEX prices are missing.
+#   - Uploaded v4 contribution mode uses forecast-error capture as an approximate MWh basis.
+#   - Auction price status shows not loaded when the selected raw EPEX price is unavailable.
+#   - Imbalance wording is shown as Imbalance PnL in the UI.
+#   - Cumulative chart spacing is adjusted to avoid title / legend overlap.
+#
 # Required:
 #   - v3_da_revenue_YYYY_MM_DD.csv
 # Optional:
@@ -41,7 +48,7 @@ import streamlit as st
 # =============================================================================
 
 st.set_page_config(
-    page_title="v17 Trader Board Web MVP v3",
+    page_title="v17 Trader Board Web MVP v3.1",
     page_icon="⚡",
     layout="wide",
 )
@@ -393,6 +400,27 @@ def safe_divide(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
     denom = pd.to_numeric(denominator, errors="coerce").replace(0, np.nan)
     out = pd.to_numeric(numerator, errors="coerce") / denom
     return out.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+
+def price_series_is_loaded(price: pd.Series) -> bool:
+    """Return True when a price series looks usable for display / MWh conversion.
+
+    In this MVP, missing raw EPEX files often become an all-zero fallback series.
+    Showing that as 0 EUR/MWh is misleading, so the UI marks it as not loaded.
+    """
+    clean = pd.to_numeric(price, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    if clean.empty:
+        return False
+    return float(clean.abs().sum()) > 1e-9
+
+
+def fmt_price_or_not_loaded(value: object) -> str:
+    if value is None or pd.isna(value):
+        return "not loaded"
+    try:
+        return f"{float(value):,.2f}"
+    except Exception:  # noqa: BLE001
+        return "not loaded"
 
 
 def detect_numeric_column_by_score(
@@ -779,18 +807,23 @@ def run_simulation(
         revenue_col = f"{key.lower()}_id_revenue_eur"
 
         df[price_col] = price
+        price_available = price_series_is_loaded(price)
+        avg_price = float(price.mean()) if price_available else np.nan
 
         if use_uploaded_v4:
-            # Use v4 as the benchmark ID-correction contribution, then scale by
-            # DA position and auction capture. This keeps MVP v3 close to v2/v4
-            # while allowing the trader controls to affect the result.
+            # Use v4 as the benchmark ID-correction EUR contribution, then scale by
+            # DA position and auction capture. For MWh display, do NOT divide by
+            # price when raw EPEX prices are missing. Instead, show an approximate
+            # executed MWh from forecast-error exposure x auction capture.
             df[revenue_col] = np.where(mask, v4_id_base.reindex(df.index).fillna(0.0) * da_factor * capture, 0.0)
-            df[trade_col] = safe_divide(df[revenue_col], price)
+            df[trade_col] = np.where(mask, df["strategy_error_mwh"] * capture, 0.0)
+            mwh_basis = "approx: forecast_error_mwh × capture"
         else:
             # Model-only fallback: correction volume equals exposed forecast error
             # multiplied by auction capture, valued at selected vintage price.
             df[trade_col] = np.where(mask, df["strategy_error_mwh"] * capture, 0.0)
             df[revenue_col] = df[trade_col] * price
+            mwh_basis = "forecast_error_mwh × capture"
 
         total_trade_mwh = total_trade_mwh + df[trade_col]
         total_id_revenue = total_id_revenue + df[revenue_col]
@@ -802,17 +835,23 @@ def run_simulation(
                 "use_auction": is_used,
                 "target_capture_pct": capture_pcts.get(key, 0.0),
                 "price_source": source_name,
-                "avg_price_eur_per_mwh": float(price.mean()),
-                "executed_trade_mwh": float(df[trade_col].sum()),
+                "price_status": "loaded" if price_available else "not loaded",
+                "avg_price_eur_per_mwh": avg_price,
+                "avg_price_display": fmt_price_or_not_loaded(avg_price),
+                "net_executed_trade_mwh": float(df[trade_col].sum()),
+                "abs_executed_trade_mwh": float(df[trade_col].abs().sum()),
                 "id_revenue_eur": float(df[revenue_col].sum()),
+                "mwh_basis": mwh_basis,
             }
         )
 
     df["total_id_trade_mwh"] = total_trade_mwh
+    df["total_id_trade_abs_mwh"] = df["total_id_trade_mwh"].abs()
     df["id_revenue_eur"] = total_id_revenue
-    df["id_revenue_source"] = "uploaded_v4_scaled_by_da_position_and_auction_capture" if use_uploaded_v4 else "model_from_strategy_error_and_selected_vintage_prices"
+    df["id_revenue_source"] = "uploaded_v4_scaled_by_da_position_and_auction_capture_mwh_approx" if use_uploaded_v4 else "model_from_strategy_error_and_selected_vintage_prices"
 
     df["remaining_imbalance_mwh"] = df["strategy_error_mwh"] - df["total_id_trade_mwh"]
+    df["remaining_imbalance_abs_mwh"] = df["remaining_imbalance_mwh"].abs()
 
     if use_uploaded_v5:
         # v5 is the no-correction imbalance benchmark.
@@ -838,14 +877,18 @@ def run_simulation(
     kpi = {
         "DA revenue EUR": float(df["da_revenue_eur"].sum()),
         "ID revenue EUR": float(df["id_revenue_eur"].sum()),
-        "Imbalance settlement EUR": float(df["imbalance_settlement_eur"].sum()),
+        "Imbalance PnL EUR": float(df["imbalance_settlement_eur"].sum()),
         "Total revenue EUR": float(df["total_revenue_eur"].sum()),
         "No-ID benchmark EUR": float(df["no_id_benchmark_eur"].sum()),
         "ID strategy value EUR": float(df["id_strategy_value_eur"].sum()),
         "Original forecast error MWh": float(df["forecast_error_mwh"].sum()),
+        "Original absolute forecast error MWh": float(df["forecast_error_mwh"].abs().sum()),
         "Strategy exposure MWh": float(df["strategy_error_mwh"].sum()),
-        "Total executed ID trade MWh": float(df["total_id_trade_mwh"].sum()),
-        "Remaining imbalance MWh": float(df["remaining_imbalance_mwh"].sum()),
+        "Strategy absolute exposure MWh": float(df["strategy_error_mwh"].abs().sum()),
+        "Total executed ID trade MWh": float(df["total_id_trade_abs_mwh"].sum()),
+        "Net executed ID trade MWh": float(df["total_id_trade_mwh"].sum()),
+        "Remaining imbalance MWh": float(df["remaining_imbalance_abs_mwh"].sum()),
+        "Net remaining imbalance MWh": float(df["remaining_imbalance_mwh"].sum()),
     }
     return df, auction_breakdown_df, kpi
 
@@ -885,10 +928,10 @@ def make_id_imbalance_chart(df: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
     fig.add_bar(x=df["time_label"], y=id_pos, name="Positive ID contribution")
     fig.add_bar(x=df["time_label"], y=id_neg, name="Negative ID contribution")
-    fig.add_bar(x=df["time_label"], y=imb_pos, name="Positive residual imbalance settlement")
-    fig.add_bar(x=df["time_label"], y=imb_neg, name="Negative residual imbalance settlement")
+    fig.add_bar(x=df["time_label"], y=imb_pos, name="Positive residual imbalance PnL")
+    fig.add_bar(x=df["time_label"], y=imb_neg, name="Negative residual imbalance PnL")
     fig.update_layout(
-        title="ID Revenue / Residual Imbalance Contribution - 5-min",
+        title="ID Revenue / Residual Imbalance PnL - 5-min",
         barmode="relative",
         height=500,
         margin=dict(l=40, r=20, t=90, b=80),
@@ -922,13 +965,13 @@ def make_cumulative_chart(df: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
     fig.add_scatter(x=df["time_label"], y=df["da_revenue_eur"].cumsum(), mode="lines", name="Cumulative DA")
     fig.add_scatter(x=df["time_label"], y=df["id_revenue_eur"].cumsum(), mode="lines", name="Cumulative ID")
-    fig.add_scatter(x=df["time_label"], y=df["imbalance_settlement_eur"].cumsum(), mode="lines", name="Cumulative imbalance")
+    fig.add_scatter(x=df["time_label"], y=df["imbalance_settlement_eur"].cumsum(), mode="lines", name="Cumulative imbalance PnL")
     fig.add_scatter(x=df["time_label"], y=df["total_revenue_eur"].cumsum(), mode="lines", name="Cumulative total")
     fig.update_layout(
-        title="Cumulative Revenue Components",
+        title=dict(text="Cumulative Revenue Components", x=0.02, xanchor="left"),
         height=430,
-        margin=dict(l=40, r=20, t=60, b=80),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+        margin=dict(l=45, r=25, t=105, b=80),
+        legend=dict(orientation="h", yanchor="bottom", y=1.18, xanchor="left", x=0.0),
         xaxis=dict(tickmode="array", tickvals=df["time_label"].iloc[::12], tickangle=-45),
         yaxis=dict(title="EUR"),
     )
@@ -972,11 +1015,39 @@ def fmt_pct(value: float) -> str:
     return f"{value:.0f}%"
 
 
+def auction_display_table(auction_breakdown_df: pd.DataFrame) -> pd.DataFrame:
+    if auction_breakdown_df.empty:
+        return auction_breakdown_df
+    preferred_cols = [
+        "auction",
+        "window",
+        "use_auction",
+        "target_capture_pct",
+        "price_source",
+        "price_status",
+        "avg_price_display",
+        "abs_executed_trade_mwh",
+        "net_executed_trade_mwh",
+        "id_revenue_eur",
+        "mwh_basis",
+    ]
+    cols = [c for c in preferred_cols if c in auction_breakdown_df.columns]
+    out = auction_breakdown_df[cols].copy()
+    out = out.rename(
+        columns={
+            "avg_price_display": "avg_price_eur_per_mwh",
+            "abs_executed_trade_mwh": "executed_trade_abs_mwh",
+            "net_executed_trade_mwh": "executed_trade_net_mwh",
+        }
+    )
+    return out
+
+
 # =============================================================================
 # UI
 # =============================================================================
 
-st.title("⚡ Convex Asset Trader Experience Board v17 - Web MVP v3")
+st.title("⚡ Convex Asset Trader Experience Board v17 - Web MVP v3.1")
 st.caption(
     "Streamlit version of the v17 trader board concept. "
     "Uses v3/v4/v5 and optional raw EPEX vintage files. v16 files are not used."
@@ -1082,7 +1153,7 @@ source_rows = [
         "sum": v4_info.get("sum", 0.0),
     },
     {
-        "item": "v5 imbalance contribution",
+        "item": "v5 imbalance PnL contribution",
         "status": "ok" if v5_info.get("selected_column") not in ["not uploaded", "not detected"] else str(v5_info.get("selected_column")),
         "selected_column": v5_info.get("selected_column"),
         "sum": v5_info.get("sum", 0.0),
@@ -1094,7 +1165,7 @@ source_rows = [
         "sum": float(settlement_df["id_revenue_eur"].sum()),
     },
     {
-        "item": "Imbalance source used",
+        "item": "Imbalance PnL source used",
         "status": str(settlement_df["imbalance_source"].iloc[0]),
         "selected_column": "",
         "sum": float(settlement_df["imbalance_settlement_eur"].sum()),
@@ -1107,7 +1178,7 @@ st.subheader(f"Trader Board Summary - {asset_label}")
 kpi_cols = st.columns(4)
 kpi_cols[0].metric("DA Revenue", fmt_eur(kpi["DA revenue EUR"]))
 kpi_cols[1].metric("ID Revenue", fmt_eur(kpi["ID revenue EUR"]))
-kpi_cols[2].metric("Imbalance Settlement", fmt_eur(kpi["Imbalance settlement EUR"]))
+kpi_cols[2].metric("Imbalance PnL", fmt_eur(kpi["Imbalance PnL EUR"]))
 kpi_cols[3].metric("Total Revenue", fmt_eur(kpi["Total revenue EUR"]))
 
 kpi_cols2 = st.columns(4)
@@ -1118,6 +1189,12 @@ kpi_cols2[3].metric("Remaining Imbalance", fmt_mwh(kpi["Remaining imbalance MWh"
 
 with st.expander("Current data-source status", expanded=True):
     st.dataframe(source_status_df, use_container_width=True)
+    if str(settlement_df["id_revenue_source"].iloc[0]).startswith("uploaded_v4"):
+        st.caption(
+            "Note: ID Revenue uses the uploaded v4 benchmark contribution. "
+            "Executed ID Trade MWh is an approximate volume based on forecast-error exposure × auction capture, "
+            "so it remains visible even when raw EPEX price files are not loaded."
+        )
 
 st.divider()
 
@@ -1134,7 +1211,7 @@ with left:
 
 with right:
     st.markdown("### Auction Settings / Results")
-    st.dataframe(auction_breakdown_df, use_container_width=True, hide_index=True)
+    st.dataframe(auction_display_table(auction_breakdown_df), use_container_width=True, hide_index=True)
 
 st.divider()
 
@@ -1179,7 +1256,7 @@ with tab2:
         st.dataframe(kpi_table, use_container_width=True, hide_index=True)
 
     st.markdown("#### Auction Breakdown")
-    st.dataframe(auction_breakdown_df, use_container_width=True, hide_index=True)
+    st.dataframe(auction_display_table(auction_breakdown_df), use_container_width=True, hide_index=True)
 
 with tab3:
     display_cols = [
@@ -1193,7 +1270,9 @@ with tab3:
         "strategy_error_mwh",
         "capture_factor",
         "total_id_trade_mwh",
+        "total_id_trade_abs_mwh",
         "remaining_imbalance_mwh",
+        "remaining_imbalance_abs_mwh",
     ]
     st.dataframe(settlement_df[display_cols], use_container_width=True, height=520)
 
@@ -1217,7 +1296,7 @@ with tab5:
     else:
         st.warning("No numeric v4 columns were detected.")
 
-    st.write("v5 imbalance contribution detection")
+    st.write("v5 imbalance PnL contribution detection")
     st.json(v5_info)
     if not v5_score_df.empty:
         st.dataframe(v5_score_df.head(40), use_container_width=True, height=300)
@@ -1248,12 +1327,12 @@ with tab6:
     st.download_button(
         label="Download calculated result as Excel",
         data=excel_bytes,
-        file_name="v17_streamlit_mvp_v3_result.xlsx",
+        file_name="v17_streamlit_mvp_v3_1_result.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
     st.download_button(
         label="Download settlement table as CSV",
         data=settlement_df.to_csv(index=False).encode("utf-8-sig"),
-        file_name="v17_streamlit_mvp_v3_settlement.csv",
+        file_name="v17_streamlit_mvp_v3_1_settlement.csv",
         mime="text/csv",
     )
