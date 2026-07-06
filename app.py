@@ -12,7 +12,7 @@ import streamlit as st
 
 
 # =============================================================================
-# Convex Asset Trader Experience Board v17 - Streamlit Web MVP v3.1.1
+# Convex Asset Trader Experience Board v17 - Streamlit Web MVP v3.4
 # =============================================================================
 # Purpose:
 #   Web-app MVP for the PyCharm / Excel v17 trader board.
@@ -39,6 +39,12 @@ import streamlit as st
 #   - Imbalance wording is shown as Imbalance PnL in the UI.
 #   - Cumulative chart spacing is adjusted to avoid title / legend overlap.
 #
+# Main fixes in v3.3:
+#   - Plotly accidental box-zoom / drag-zoom is disabled for all charts.
+#   - Plotly modebar removes zoom / pan / select / lasso controls.
+#   - DA positive revenue uses a light orange color.
+#   - DA negative revenue uses a light blue color.
+#
 # Required:
 #   - v3_da_revenue_YYYY_MM_DD.csv
 # Optional:
@@ -48,10 +54,33 @@ import streamlit as st
 # =============================================================================
 
 st.set_page_config(
-    page_title="v17 Trader Board Web MVP v3.1",
+    page_title="v17 Trader Board Web MVP v3.4",
     page_icon="⚡",
     layout="wide",
 )
+
+# =============================================================================
+# Chart interaction and color settings
+# =============================================================================
+# Prevent accidental click-drag zoom behavior in Plotly charts.
+PLOTLY_CONFIG = {
+    "displayModeBar": True,
+    "scrollZoom": False,
+    "displaylogo": False,
+    "modeBarButtonsToRemove": [
+        "zoom2d",
+        "pan2d",
+        "select2d",
+        "lasso2d",
+        "zoomIn2d",
+        "zoomOut2d",
+        "autoScale2d",
+    ],
+}
+
+# Requested DA revenue colors.
+DA_POSITIVE_COLOR = "rgba(255, 183, 77, 0.75)"   # light orange
+DA_NEGATIVE_COLOR = "rgba(144, 202, 249, 0.75)"  # light blue
 
 
 @dataclass(frozen=True)
@@ -229,10 +258,19 @@ PRICE_CANDIDATES = {
     ),
     "id3": (
         "id3_benchmark_price_eur_per_mwh",
+        "id3_benchmark_price_eur_mwh",
+        "expost_id3_price_eur_per_mwh",
+        "expost_id3_price_eur_mwh",
+        "final_id3_price_eur_per_mwh",
+        "final_id3_price_eur_mwh",
         "id3_price_eur_per_mwh",
+        "id3_price_eur_mwh",
         "id3_benchmark_price",
         "id3_price",
+        "id_price_eur_per_mwh",
+        "id_price_eur_mwh",
         "intraday_price_eur_per_mwh",
+        "intraday_price_eur_mwh",
     ),
     "imbalance": (
         "imbalance_price_eur_per_mwh",
@@ -272,9 +310,9 @@ PRICE_OPTIONS = [
 ]
 
 DEFAULT_AUCTION_SETTINGS = {
-    "IDA3": (True, 100.0, "IDA3 vintage"),
-    "IDA1": (True, 100.0, "IDA1 vintage"),
-    "IDA2": (True, 100.0, "IDA2 vintage"),
+    "IDA3": (True, 100.0, "ID3 Benchmark Price"),
+    "IDA1": (True, 100.0, "ID3 Benchmark Price"),
+    "IDA2": (True, 100.0, "ID3 Benchmark Price"),
 }
 
 
@@ -421,6 +459,102 @@ def fmt_price_or_not_loaded(value: object) -> str:
         return f"{float(value):,.2f}"
     except Exception:  # noqa: BLE001
         return "not loaded"
+
+
+def aligned_price_from_source_df(
+    source_df: pd.DataFrame,
+    input_df: pd.DataFrame,
+    candidates: Iterable[str],
+) -> Tuple[Optional[pd.Series], str]:
+    """Find and align a price column from a normalized source dataframe."""
+    if source_df is None or source_df.empty:
+        return None, "not available"
+
+    price_col = first_existing_column(source_df, candidates)
+    if price_col is None:
+        return None, "not detected"
+
+    aligned = align_series_to_input(source_df, input_df, price_col)
+    if not price_series_is_loaded(aligned):
+        return None, f"{price_col} detected but empty/zero"
+
+    return aligned.astype(float).reset_index(drop=True), price_col
+
+
+def derive_id3_price_from_v4_contribution(input_df: pd.DataFrame, v4_id_base: pd.Series) -> Optional[pd.Series]:
+    """Derive an implied ID3 benchmark price when no explicit price column is available.
+
+    This is a fallback for the web MVP only. It assumes the uploaded v4 ID contribution
+    is approximately forecast_error_mwh × ID3 benchmark price. Rows with near-zero
+    exposure are ignored, and gaps are interpolated.
+    """
+    if v4_id_base is None or v4_id_base.abs().sum() <= 0:
+        return None
+
+    error = pd.to_numeric(input_df.get("forecast_error_mwh", pd.Series(0.0, index=input_df.index)), errors="coerce")
+    contrib = pd.to_numeric(v4_id_base, errors="coerce").reindex(input_df.index).fillna(0.0)
+    denom = error.where(error.abs() > 1e-6)
+    implied = (contrib / denom).replace([np.inf, -np.inf], np.nan)
+
+    # Keep a broad but sane electricity-price range. Negative ID prices are allowed.
+    implied = implied.where(implied.between(-1000.0, 2000.0))
+    if implied.notna().sum() < 10:
+        return None
+
+    implied = implied.interpolate(limit_direction="both").ffill().bfill().fillna(0.0)
+    if not price_series_is_loaded(implied):
+        return None
+    return implied.astype(float).reset_index(drop=True)
+
+
+def build_id3_benchmark_price(
+    input_df: pd.DataFrame,
+    v4_norm_df: pd.DataFrame,
+    v5_norm_df: pd.DataFrame,
+    v4_id_base: pd.Series,
+) -> Tuple[pd.Series, Dict[str, object]]:
+    """Return the best available ID3 benchmark price series and source info."""
+    zero = pd.Series(0.0, index=input_df.index, dtype=float).reset_index(drop=True)
+
+    direct = pd.to_numeric(input_df.get("id3_benchmark_price_eur_per_mwh", zero), errors="coerce").fillna(0.0)
+    direct = direct.reset_index(drop=True)
+    if price_series_is_loaded(direct):
+        return direct, {
+            "status": "loaded from v3",
+            "selected_column": "id3_benchmark_price_eur_per_mwh",
+            "avg_price": float(direct.mean()),
+            "min_price": float(direct.min()),
+            "max_price": float(direct.max()),
+        }
+
+    for label, source_df in (("v4", v4_norm_df), ("v5", v5_norm_df)):
+        aligned, col = aligned_price_from_source_df(source_df, input_df, PRICE_CANDIDATES["id3"])
+        if aligned is not None:
+            return aligned, {
+                "status": f"loaded from {label}",
+                "selected_column": col,
+                "avg_price": float(aligned.mean()),
+                "min_price": float(aligned.min()),
+                "max_price": float(aligned.max()),
+            }
+
+    implied = derive_id3_price_from_v4_contribution(input_df, v4_id_base)
+    if implied is not None:
+        return implied, {
+            "status": "implied from v4 ID contribution / forecast error",
+            "selected_column": "v4_id_contribution / forecast_error_mwh",
+            "avg_price": float(implied.mean()),
+            "min_price": float(implied.min()),
+            "max_price": float(implied.max()),
+        }
+
+    return zero, {
+        "status": "not loaded",
+        "selected_column": "not detected",
+        "avg_price": np.nan,
+        "min_price": np.nan,
+        "max_price": np.nan,
+    }
 
 
 def detect_numeric_column_by_score(
@@ -638,17 +772,40 @@ def raw_price_key_from_filename(name: str) -> Optional[str]:
     return None
 
 
-def load_raw_vintage_prices(files, input_df: pd.DataFrame, fallback: pd.Series) -> Tuple[Dict[str, pd.Series], pd.DataFrame]:
+def load_raw_vintage_prices(
+    files,
+    input_df: pd.DataFrame,
+    id3_benchmark_price: pd.Series,
+    id3_benchmark_info: Dict[str, object],
+) -> Tuple[Dict[str, pd.Series], pd.DataFrame]:
+    zero = pd.Series(0.0, index=input_df.index, dtype=float).reset_index(drop=True)
+    id3 = pd.to_numeric(id3_benchmark_price, errors="coerce").reset_index(drop=True).reindex(range(len(input_df))).ffill().bfill().fillna(0.0)
+
+    # Important v3.4 behavior:
+    #   - ID3 Benchmark Price uses the best available ID3 benchmark series.
+    #   - Raw vintage price sources remain "not loaded" unless the user uploads matching raw EPEX CSVs.
+    # This avoids accidentally treating IDA1/IDA2/IDA3 vintage prices as if they were ID3 benchmark prices.
     result: Dict[str, pd.Series] = {
-        "ID3 Benchmark Price": fallback.copy().reset_index(drop=True),
-        "03:00 ID vintage": fallback.copy().reset_index(drop=True),
-        "06:00 ID vintage": fallback.copy().reset_index(drop=True),
-        "09:00 ID vintage": fallback.copy().reset_index(drop=True),
-        "IDA3 vintage": fallback.copy().reset_index(drop=True),
-        "IDA1 vintage": fallback.copy().reset_index(drop=True),
-        "IDA2 vintage": fallback.copy().reset_index(drop=True),
+        "ID3 Benchmark Price": id3.astype(float),
+        "03:00 ID vintage": zero.copy(),
+        "06:00 ID vintage": zero.copy(),
+        "09:00 ID vintage": zero.copy(),
+        "IDA3 vintage": zero.copy(),
+        "IDA1 vintage": zero.copy(),
+        "IDA2 vintage": zero.copy(),
     }
-    rows: List[Dict[str, object]] = []
+
+    rows: List[Dict[str, object]] = [
+        {
+            "file": "v3/v4/v5 detected source",
+            "mapped_to": "ID3 Benchmark Price",
+            "status": id3_benchmark_info.get("status", "not loaded"),
+            "selected_column": id3_benchmark_info.get("selected_column", ""),
+            "avg_price": id3_benchmark_info.get("avg_price", np.nan),
+            "min_price": id3_benchmark_info.get("min_price", np.nan),
+            "max_price": id3_benchmark_info.get("max_price", np.nan),
+        }
+    ]
 
     if not files:
         return result, pd.DataFrame(rows)
@@ -661,20 +818,21 @@ def load_raw_vintage_prices(files, input_df: pd.DataFrame, fallback: pd.Series) 
         try:
             df = read_csv_upload(uploaded)
             aligned = align_price_to_input(df, input_df)
-            if aligned is not None:
+            if aligned is not None and price_series_is_loaded(aligned):
                 result[key] = aligned.astype(float).reset_index(drop=True)
                 rows.append(
                     {
                         "file": uploaded.name,
                         "mapped_to": key,
                         "status": "ok",
+                        "selected_column": "auto-detected price column",
                         "avg_price": float(result[key].mean()),
                         "min_price": float(result[key].min()),
                         "max_price": float(result[key].max()),
                     }
                 )
             else:
-                rows.append({"file": uploaded.name, "mapped_to": key, "status": "no price column detected"})
+                rows.append({"file": uploaded.name, "mapped_to": key, "status": "no usable price column detected"})
         except Exception as exc:  # noqa: BLE001
             rows.append({"file": uploaded.name, "mapped_to": key, "status": f"error: {exc}"})
 
@@ -903,10 +1061,11 @@ def make_da_chart(df: pd.DataFrame) -> go.Figure:
     y_min, y_max = nice_axis_limits(df["da_revenue_eur"])
 
     fig = go.Figure()
-    fig.add_bar(x=df["time_label"], y=pos, name="Positive DA Revenue EUR")
-    fig.add_bar(x=df["time_label"], y=neg, name="Negative DA Revenue EUR")
+    fig.add_bar(x=df["time_label"], y=pos, name="Positive DA Revenue EUR", marker_color=DA_POSITIVE_COLOR)
+    fig.add_bar(x=df["time_label"], y=neg, name="Negative DA Revenue EUR", marker_color=DA_NEGATIVE_COLOR)
     fig.update_layout(
         title="DA Revenue EUR - 5-min contribution",
+        dragmode=False,
         barmode="relative",
         height=430,
         margin=dict(l=40, r=20, t=60, b=80),
@@ -932,6 +1091,7 @@ def make_id_imbalance_chart(df: pd.DataFrame) -> go.Figure:
     fig.add_bar(x=df["time_label"], y=imb_neg, name="Negative residual imbalance PnL")
     fig.update_layout(
         title="ID Revenue / Residual Imbalance PnL - 5-min",
+        dragmode=False,
         barmode="relative",
         height=500,
         margin=dict(l=40, r=20, t=90, b=80),
@@ -945,6 +1105,7 @@ def make_id_imbalance_chart(df: pd.DataFrame) -> go.Figure:
 def make_auction_chart(auction_breakdown_df: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
     if auction_breakdown_df.empty:
+        fig.update_layout(height=420, dragmode=False, margin=dict(l=45, r=20, t=30, b=70))
         return fig
 
     fig.add_bar(
@@ -953,9 +1114,10 @@ def make_auction_chart(auction_breakdown_df: pd.DataFrame) -> go.Figure:
         name="ID revenue EUR",
     )
     fig.update_layout(
-        title="ID Revenue by Auction Window",
-        height=360,
-        margin=dict(l=40, r=20, t=60, b=60),
+        height=420,
+        dragmode=False,
+        margin=dict(l=55, r=20, t=35, b=70),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0.0),
         yaxis=dict(title="EUR"),
     )
     return fig
@@ -963,15 +1125,15 @@ def make_auction_chart(auction_breakdown_df: pd.DataFrame) -> go.Figure:
 
 def make_cumulative_chart(df: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
-    fig.add_scatter(x=df["time_label"], y=df["da_revenue_eur"].cumsum(), mode="lines", name="Cumulative DA")
-    fig.add_scatter(x=df["time_label"], y=df["id_revenue_eur"].cumsum(), mode="lines", name="Cumulative ID")
-    fig.add_scatter(x=df["time_label"], y=df["imbalance_settlement_eur"].cumsum(), mode="lines", name="Cumulative imbalance PnL")
-    fig.add_scatter(x=df["time_label"], y=df["total_revenue_eur"].cumsum(), mode="lines", name="Cumulative total")
+    fig.add_scatter(x=df["time_label"], y=df["da_revenue_eur"].cumsum(), mode="lines", name="DA")
+    fig.add_scatter(x=df["time_label"], y=df["id_revenue_eur"].cumsum(), mode="lines", name="ID")
+    fig.add_scatter(x=df["time_label"], y=df["imbalance_settlement_eur"].cumsum(), mode="lines", name="Imbalance PnL")
+    fig.add_scatter(x=df["time_label"], y=df["total_revenue_eur"].cumsum(), mode="lines", name="Total")
     fig.update_layout(
-        title=dict(text="Cumulative Revenue Components", x=0.02, xanchor="left"),
-        height=430,
-        margin=dict(l=45, r=25, t=105, b=80),
-        legend=dict(orientation="h", yanchor="bottom", y=1.18, xanchor="left", x=0.0),
+        height=420,
+        dragmode=False,
+        margin=dict(l=55, r=25, t=45, b=80),
+        legend=dict(orientation="h", yanchor="bottom", y=1.04, xanchor="left", x=0.0),
         xaxis=dict(tickmode="array", tickvals=df["time_label"].iloc[::12], tickangle=-45),
         yaxis=dict(title="EUR"),
     )
@@ -1047,7 +1209,7 @@ def auction_display_table(auction_breakdown_df: pd.DataFrame) -> pd.DataFrame:
 # UI
 # =============================================================================
 
-st.title("⚡ Convex Asset Trader Experience Board v17 - Web MVP v3.1")
+st.title("⚡ Convex Asset Trader Experience Board v17 - Web MVP v3.4")
 st.caption(
     "Streamlit version of the v17 trader board concept. "
     "Uses v3/v4/v5 and optional raw EPEX vintage files. v16 files are not used."
@@ -1120,10 +1282,18 @@ except Exception as exc:  # noqa: BLE001
 v4_id_base, v4_info, v4_norm_df, v4_score_df = load_contribution_file(v4_file, input_df, asset, purpose="id")
 v5_imbalance_base, v5_info, v5_norm_df, v5_score_df = load_contribution_file(v5_file, input_df, asset, purpose="imbalance")
 
+id3_benchmark_price, id3_benchmark_info = build_id3_benchmark_price(
+    input_df=input_df,
+    v4_norm_df=v4_norm_df,
+    v5_norm_df=v5_norm_df,
+    v4_id_base=v4_id_base,
+)
+
 vintage_prices, epex_info_df = load_raw_vintage_prices(
     epex_files,
     input_df,
-    fallback=input_df["id3_benchmark_price_eur_per_mwh"],
+    id3_benchmark_price=id3_benchmark_price,
+    id3_benchmark_info=id3_benchmark_info,
 )
 
 settlement_df, auction_breakdown_df, kpi = run_simulation(
@@ -1157,6 +1327,12 @@ source_rows = [
         "status": "ok" if v5_info.get("selected_column") not in ["not uploaded", "not detected"] else str(v5_info.get("selected_column")),
         "selected_column": v5_info.get("selected_column"),
         "sum": v5_info.get("sum", 0.0),
+    },
+    {
+        "item": "ID3 Benchmark Price",
+        "status": id3_benchmark_info.get("status", "not loaded"),
+        "selected_column": id3_benchmark_info.get("selected_column", ""),
+        "sum": id3_benchmark_info.get("avg_price", np.nan),
     },
     {
         "item": "ID revenue source used",
@@ -1212,6 +1388,11 @@ with left:
 with right:
     st.markdown("### Auction Settings / Results")
     st.dataframe(auction_display_table(auction_breakdown_df), use_container_width=True, hide_index=True)
+    if not epex_files:
+        st.caption(
+            "Raw EPEX vintage price files are not loaded. ID3 Benchmark Price is loaded from the best available v3/v4/v5 source when possible; "
+            "other raw vintage prices remain 'not loaded' until matching raw EPEX CSVs are uploaded."
+        )
 
 st.divider()
 
@@ -1227,13 +1408,15 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
 )
 
 with tab1:
-    st.plotly_chart(make_da_chart(settlement_df), use_container_width=True)
-    st.plotly_chart(make_id_imbalance_chart(settlement_df), use_container_width=True)
+    st.plotly_chart(make_da_chart(settlement_df), use_container_width=True, config=PLOTLY_CONFIG)
+    st.plotly_chart(make_id_imbalance_chart(settlement_df), use_container_width=True, config=PLOTLY_CONFIG)
     c1, c2 = st.columns(2)
     with c1:
-        st.plotly_chart(make_auction_chart(auction_breakdown_df), use_container_width=True)
+        st.markdown("#### ID Revenue by Auction Window")
+        st.plotly_chart(make_auction_chart(auction_breakdown_df), use_container_width=True, config=PLOTLY_CONFIG)
     with c2:
-        st.plotly_chart(make_cumulative_chart(settlement_df), use_container_width=True)
+        st.markdown("#### Cumulative Revenue Components")
+        st.plotly_chart(make_cumulative_chart(settlement_df), use_container_width=True, config=PLOTLY_CONFIG)
 
 with tab2:
     c1, c2 = st.columns([0.8, 1.2])
@@ -1305,11 +1488,10 @@ with tab5:
     else:
         st.warning("No numeric v5 columns were detected.")
 
-    st.write("raw EPEX file mapping")
-    if epex_info_df.empty:
-        st.info("No raw EPEX files uploaded.")
-    else:
-        st.dataframe(epex_info_df, use_container_width=True)
+    st.write("ID3 benchmark / raw EPEX price mapping")
+    st.dataframe(epex_info_df, use_container_width=True)
+    if not epex_files:
+        st.info("No raw EPEX vintage files uploaded. Only the ID3 Benchmark Price source is available if detected or implied.")
 
 with tab6:
     v3_columns_df = pd.DataFrame({"v3_columns": list(v3_norm_df.columns)})
@@ -1327,12 +1509,12 @@ with tab6:
     st.download_button(
         label="Download calculated result as Excel",
         data=excel_bytes,
-        file_name="v17_streamlit_mvp_v3_1_result.xlsx",
+        file_name="v17_streamlit_mvp_v3_4_result.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
     st.download_button(
         label="Download settlement table as CSV",
         data=settlement_df.to_csv(index=False).encode("utf-8-sig"),
-        file_name="v17_streamlit_mvp_v3_1_settlement.csv",
+        file_name="v17_streamlit_mvp_v3_4_settlement.csv",
         mime="text/csv",
     )
