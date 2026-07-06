@@ -12,19 +12,25 @@ import streamlit as st
 
 
 # =============================================================================
-# Convex Asset Trader Experience Board v17 - Streamlit MVP v2
+# Convex Asset Trader Experience Board v17 - Streamlit Web MVP v3
 # =============================================================================
 # Purpose:
 #   Web-app MVP for the PyCharm / Excel v17 trader board.
-#   v16 files are NOT used.
+#   This version is designed as the next step after Streamlit MVP v2.
 #
-# Main update in v2:
-#   - v4/v5 column-name diagnostics are displayed.
-#   - v4 ID-correction contribution columns are auto-detected.
-#   - v5 no-correction / imbalance contribution columns are auto-detected.
-#   - ID / residual imbalance graph uses uploaded v4/v5 benchmark contributions
-#     when available, so the graph is no longer blank when v3 forecast-error
-#     columns are missing or named differently.
+# Important scope:
+#   - v16 files are NOT used.
+#   - Main inputs are v3 / v4 / v5 CSV files plus optional raw EPEX ID vintage CSVs.
+#   - This is still a Web MVP, not a complete Excel formula-engine reproduction.
+#
+# Main updates in v3:
+#   - Cleaner Trader Decision Board style layout.
+#   - Strategy Mode: DA + ID Correction / DA Only.
+#   - DA Sold % control.
+#   - Separate IDA3 / IDA1 / IDA2 Use Auction and Target Capture % controls.
+#   - Raw EPEX vintage price mapping and price-source status display.
+#   - ID auction breakdown table and chart.
+#   - Excel / CSV download of calculated web results.
 #
 # Required:
 #   - v3_da_revenue_YYYY_MM_DD.csv
@@ -35,7 +41,7 @@ import streamlit as st
 # =============================================================================
 
 st.set_page_config(
-    page_title="v17 Trader Board Web MVP",
+    page_title="v17 Trader Board Web MVP v3",
     page_icon="⚡",
     layout="wide",
 )
@@ -63,7 +69,10 @@ ASSETS: Dict[str, AssetConfig] = {
             "portfolio_da_revenue_eur",
             "portfolio_da_revenue_5min_eur",
             "portfolio_da_revenue_eur_5min",
+            "portfolio_da_only_revenue_eur",
             "da_revenue_eur",
+            "da_revenue_5min_eur",
+            "da_revenue_eur_5min",
         ),
         forecast_candidates=(
             "portfolio_forecast_mw",
@@ -86,6 +95,7 @@ ASSETS: Dict[str, AssetConfig] = {
             "portfolio_forecast_error_mwh",
             "portfolio_error_mwh",
             "portfolio_error_5min_mwh",
+            "portfolio_forecast_error_5min_mwh",
             "forecast_error_mwh_5min",
             "forecast_error_mwh",
             "error_mwh",
@@ -97,6 +107,8 @@ ASSETS: Dict[str, AssetConfig] = {
             "portfolio_id_revenue_eur",
             "portfolio_id_pnl_eur",
             "id_correction_pnl_eur",
+            "id_correction_revenue_eur",
+            "id_correction_value_eur",
             "id_revenue_eur",
         ),
         v5_imbalance_candidates=(
@@ -105,6 +117,7 @@ ASSETS: Dict[str, AssetConfig] = {
             "portfolio_imbalance_settlement_eur",
             "portfolio_no_correction_pnl_eur",
             "no_correction_imbalance_pnl_eur",
+            "no_correction_pnl_eur",
             "imbalance_settlement_eur",
             "imbalance_pnl_eur",
         ),
@@ -117,6 +130,7 @@ ASSETS: Dict[str, AssetConfig] = {
             "wind_da_revenue_eur",
             "wind_da_revenue_5min_eur",
             "wind_da_revenue_eur_5min",
+            "wind_da_only_revenue_eur",
         ),
         forecast_candidates=(
             "wind_forecast_mw",
@@ -135,6 +149,7 @@ ASSETS: Dict[str, AssetConfig] = {
             "wind_forecast_error_mwh",
             "wind_error_mwh",
             "wind_error_5min_mwh",
+            "wind_forecast_error_5min_mwh",
             "forecast_error_mwh_5min",
         ),
         v4_id_candidates=(
@@ -159,6 +174,7 @@ ASSETS: Dict[str, AssetConfig] = {
             "solar_da_revenue_eur",
             "solar_da_revenue_5min_eur",
             "solar_da_revenue_eur_5min",
+            "solar_da_only_revenue_eur",
         ),
         forecast_candidates=(
             "solar_forecast_mw",
@@ -177,6 +193,7 @@ ASSETS: Dict[str, AssetConfig] = {
             "solar_forecast_error_mwh",
             "solar_error_mwh",
             "solar_error_5min_mwh",
+            "solar_forecast_error_5min_mwh",
             "forecast_error_mwh_5min",
         ),
         v4_id_candidates=(
@@ -208,6 +225,7 @@ PRICE_CANDIDATES = {
         "id3_price_eur_per_mwh",
         "id3_benchmark_price",
         "id3_price",
+        "intraday_price_eur_per_mwh",
     ),
     "imbalance": (
         "imbalance_price_eur_per_mwh",
@@ -230,11 +248,26 @@ TIME_CANDIDATES = (
     "mtu",
 )
 
-WINDOWS = {
-    "PRE_IDA": ("00:00", "09:55"),
+AUCTIONS = {
     "IDA3": ("09:55", "14:55"),
     "IDA1": ("14:55", "21:55"),
     "IDA2": ("21:55", "24:00"),
+}
+
+PRICE_OPTIONS = [
+    "ID3 Benchmark Price",
+    "03:00 ID vintage",
+    "06:00 ID vintage",
+    "09:00 ID vintage",
+    "IDA3 vintage",
+    "IDA1 vintage",
+    "IDA2 vintage",
+]
+
+DEFAULT_AUCTION_SETTINGS = {
+    "IDA3": (True, 100.0, "IDA3 vintage"),
+    "IDA1": (True, 100.0, "IDA1 vintage"),
+    "IDA2": (True, 100.0, "IDA2 vintage"),
 }
 
 
@@ -330,7 +363,8 @@ def build_capture_factor(df: pd.DataFrame, use_flags: Dict[str, bool], capture_p
     factor = pd.Series(0.0, index=df.index, dtype=float)
     if not allow_id:
         return factor
-    for key, (start, end) in WINDOWS.items():
+
+    for key, (start, end) in AUCTIONS.items():
         if use_flags.get(key, False):
             mask = window_mask(df["timestamp"], start, end)
             factor.loc[mask] = capture_pcts.get(key, 0.0) / 100.0
@@ -341,16 +375,24 @@ def nice_axis_limits(values: pd.Series, pad: float = 1.15) -> Tuple[float, float
     clean = pd.to_numeric(values, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
     if clean.empty:
         return -1.0, 1.0
+
     vmin = float(clean.min())
     vmax = float(clean.max())
     if vmin == 0 and vmax == 0:
         return -1.0, 1.0
+
     max_abs = max(abs(vmin), abs(vmax)) * pad
     if vmin >= 0:
         return 0.0, max_abs
     if vmax <= 0:
         return -max_abs, 0.0
     return -max_abs, max_abs
+
+
+def safe_divide(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
+    denom = pd.to_numeric(denominator, errors="coerce").replace(0, np.nan)
+    out = pd.to_numeric(numerator, errors="coerce") / denom
+    return out.replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
 
 def detect_numeric_column_by_score(
@@ -371,13 +413,12 @@ def detect_numeric_column_by_score(
 
         score = 0
         reasons: List[str] = []
+        tokens = set(col.split("_"))
+        name = col
 
         if col == exact:
             score += 100
             reasons.append("exact candidate")
-
-        tokens = set(col.split("_"))
-        name = col
 
         if asset.key in tokens or asset.key in name:
             score += 20
@@ -386,7 +427,7 @@ def detect_numeric_column_by_score(
         if purpose == "id":
             if "id" in tokens or "intraday" in name:
                 score += 15
-                reasons.append("id")
+                reasons.append("id/intraday")
             if "correction" in tokens or "correction" in name:
                 score += 12
                 reasons.append("correction")
@@ -453,12 +494,17 @@ def align_series_to_input(source_df: pd.DataFrame, input_df: pd.DataFrame, value
         if merged["value"].notna().sum() > 0:
             return merged["value"].fillna(0.0).astype(float).reset_index(drop=True)
 
-    # Fallback: row order. This is usually correct for v3/v4/v5 288-row daily files.
+    # Fallback: row order. This is usually correct for 288-row daily files.
     aligned = value.reset_index(drop=True).reindex(range(len(input_df))).fillna(0.0)
     return aligned.astype(float)
 
 
-def load_contribution_file(uploaded_file, input_df: pd.DataFrame, asset: AssetConfig, purpose: str) -> Tuple[pd.Series, Dict[str, object], pd.DataFrame, pd.DataFrame]:
+def load_contribution_file(
+    uploaded_file,
+    input_df: pd.DataFrame,
+    asset: AssetConfig,
+    purpose: str,
+) -> Tuple[pd.Series, Dict[str, object], pd.DataFrame, pd.DataFrame]:
     if uploaded_file is None:
         empty = pd.Series(0.0, index=input_df.index, dtype=float)
         return empty, {"file": None, "selected_column": "not uploaded", "sum": 0.0}, pd.DataFrame(), pd.DataFrame()
@@ -490,7 +536,7 @@ def load_contribution_file(uploaded_file, input_df: pd.DataFrame, asset: AssetCo
 
 
 # =============================================================================
-# Raw EPEX helpers
+# Raw EPEX vintage helpers
 # =============================================================================
 
 def find_price_column(df: pd.DataFrame) -> Optional[str]:
@@ -503,6 +549,8 @@ def find_price_column(df: pd.DataFrame) -> Optional[str]:
             "weighted_average_price",
             "id_price",
             "id3_price",
+            "intraday_price",
+            "intraday_price_eur_per_mwh",
         ),
     )
     if explicit:
@@ -538,36 +586,39 @@ def align_price_to_input(raw_df: pd.DataFrame, input_df: pd.DataFrame) -> Option
     if len(price) >= len(input_df):
         return price.iloc[: len(input_df)].reset_index(drop=True).ffill().bfill().fillna(0.0)
     if len(price) > 0:
-        return price.reindex(range(len(input_df))).ffill().bfill().fillna(float(price.dropna().iloc[0]) if price.dropna().size else 0.0)
+        default_price = float(price.dropna().iloc[0]) if price.dropna().size else 0.0
+        return price.reindex(range(len(input_df))).ffill().bfill().fillna(default_price)
     return None
 
 
 def raw_price_key_from_filename(name: str) -> Optional[str]:
     n = name.lower()
-    if "ida3" in n:
+    normalized = re.sub(r"[^a-z0-9]+", "_", n)
+
+    if "ida3" in normalized or "09_55" in normalized or "0955" in normalized or "10_05" in normalized or "1005" in normalized:
         return "IDA3 vintage"
-    if "ida1" in n:
+    if "ida1" in normalized or "14_55" in normalized or "1455" in normalized or "15_05" in normalized or "1505" in normalized:
         return "IDA1 vintage"
-    if "ida2" in n:
+    if "ida2" in normalized or "21_55" in normalized or "2155" in normalized or "22_05" in normalized or "2205" in normalized:
         return "IDA2 vintage"
-    if "0300" in n or "03_00" in n:
+    if "03_00" in normalized or "0300" in normalized:
         return "03:00 ID vintage"
-    if "0600" in n or "06_00" in n:
+    if "06_00" in normalized or "0600" in normalized:
         return "06:00 ID vintage"
-    if "0900" in n or "09_00" in n:
+    if "09_00" in normalized or "0900" in normalized:
         return "09:00 ID vintage"
     return None
 
 
 def load_raw_vintage_prices(files, input_df: pd.DataFrame, fallback: pd.Series) -> Tuple[Dict[str, pd.Series], pd.DataFrame]:
     result: Dict[str, pd.Series] = {
-        "ID3 Benchmark Price": fallback.copy(),
-        "03:00 ID vintage": fallback.copy(),
-        "06:00 ID vintage": fallback.copy(),
-        "09:00 ID vintage": fallback.copy(),
-        "IDA3 vintage": fallback.copy(),
-        "IDA1 vintage": fallback.copy(),
-        "IDA2 vintage": fallback.copy(),
+        "ID3 Benchmark Price": fallback.copy().reset_index(drop=True),
+        "03:00 ID vintage": fallback.copy().reset_index(drop=True),
+        "06:00 ID vintage": fallback.copy().reset_index(drop=True),
+        "09:00 ID vintage": fallback.copy().reset_index(drop=True),
+        "IDA3 vintage": fallback.copy().reset_index(drop=True),
+        "IDA1 vintage": fallback.copy().reset_index(drop=True),
+        "IDA2 vintage": fallback.copy().reset_index(drop=True),
     }
     rows: List[Dict[str, object]] = []
 
@@ -584,7 +635,16 @@ def load_raw_vintage_prices(files, input_df: pd.DataFrame, fallback: pd.Series) 
             aligned = align_price_to_input(df, input_df)
             if aligned is not None:
                 result[key] = aligned.astype(float).reset_index(drop=True)
-                rows.append({"file": uploaded.name, "mapped_to": key, "status": "ok", "avg_price": float(result[key].mean())})
+                rows.append(
+                    {
+                        "file": uploaded.name,
+                        "mapped_to": key,
+                        "status": "ok",
+                        "avg_price": float(result[key].mean()),
+                        "min_price": float(result[key].min()),
+                        "max_price": float(result[key].max()),
+                    }
+                )
             else:
                 rows.append({"file": uploaded.name, "mapped_to": key, "status": "no price column detected"})
         except Exception as exc:  # noqa: BLE001
@@ -594,7 +654,7 @@ def load_raw_vintage_prices(files, input_df: pd.DataFrame, fallback: pd.Series) 
 
 
 # =============================================================================
-# Build input and simulation
+# Build input and run simulation
 # =============================================================================
 
 @st.cache_data(show_spinner=False)
@@ -678,58 +738,87 @@ def run_simulation(
     contribution_source_mode: str,
     v4_id_base: pd.Series,
     v5_imbalance_base: pd.Series,
-) -> Tuple[pd.DataFrame, Dict[str, float]]:
+) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, float]]:
     df = input_df.copy()
 
-    da_multiplier = 0.0 if strategy_mode == "ID Only" else da_sold_pct / 100.0
-    allow_id = strategy_mode != "DA Only"
+    da_factor = da_sold_pct / 100.0
+    allow_id = strategy_mode == "DA + ID Correction"
     capture_factor = build_capture_factor(df, use_flags, capture_pcts, allow_id=allow_id)
 
-    df["da_revenue_eur"] = df["da_revenue_eur_5min"] * da_multiplier
+    # MVP assumption:
+    # DA Sold % scales DA revenue and the original v17 forecast-error exposure.
+    # Therefore DA Sold % = 0% suppresses both DA revenue and ID correction value.
+    df["da_position_factor"] = da_factor
+    df["da_revenue_eur"] = df["da_revenue_eur_5min"] * da_factor
+    df["strategy_error_mwh"] = df["forecast_error_mwh"] * da_factor
     df["capture_factor"] = capture_factor
 
-    use_uploaded_v4 = contribution_source_mode in ("Auto: prefer uploaded v4/v5", "Use uploaded v4/v5 benchmark columns") and v4_id_base.abs().sum() > 0
-    use_uploaded_v5 = contribution_source_mode in ("Auto: prefer uploaded v4/v5", "Use uploaded v4/v5 benchmark columns") and v5_imbalance_base.abs().sum() > 0
+    use_uploaded_v4 = (
+        contribution_source_mode in ("Auto: prefer uploaded v4/v5", "Use uploaded v4/v5 benchmark columns")
+        and v4_id_base.abs().sum() > 0
+    )
+    use_uploaded_v5 = (
+        contribution_source_mode in ("Auto: prefer uploaded v4/v5", "Use uploaded v4/v5 benchmark columns")
+        and v5_imbalance_base.abs().sum() > 0
+    )
 
-    if use_uploaded_v4:
-        df["id_revenue_eur"] = v4_id_base.reindex(df.index).fillna(0.0).astype(float) * capture_factor
-        df["id_revenue_source"] = "uploaded_v4_scaled_by_capture"
-        # Approximate ID trade MWh only for KPI display when price is available.
-        safe_price = df["id3_benchmark_price_eur_per_mwh"].replace(0, np.nan)
-        df["total_id_trade_mwh"] = (df["id_revenue_eur"] / safe_price).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    else:
-        total_trade = pd.Series(0.0, index=df.index)
-        total_id_revenue = pd.Series(0.0, index=df.index)
-        for key, (start, end) in WINDOWS.items():
-            mask = window_mask(df["timestamp"], start, end)
-            capture = (capture_pcts.get(key, 0.0) / 100.0) if (allow_id and use_flags.get(key, False)) else 0.0
-            trade_col = f"{key.lower()}_trade_mwh"
-            price_col = f"{key.lower()}_price_eur_per_mwh"
-            rev_col = f"{key.lower()}_id_revenue_eur"
+    total_trade_mwh = pd.Series(0.0, index=df.index, dtype=float)
+    total_id_revenue = pd.Series(0.0, index=df.index, dtype=float)
+    auction_rows: List[Dict[str, object]] = []
 
-            source_name = price_sources.get(key, "ID3 Benchmark Price")
-            price = vintage_prices.get(source_name, df["id3_benchmark_price_eur_per_mwh"])
-            price = pd.Series(price).reset_index(drop=True).reindex(df.index).ffill().bfill().fillna(0.0)
+    for key, (start, end) in AUCTIONS.items():
+        mask = window_mask(df["timestamp"], start, end)
+        is_used = bool(use_flags.get(key, False) and allow_id)
+        capture = (capture_pcts.get(key, 0.0) / 100.0) if is_used else 0.0
+        source_name = price_sources.get(key, "ID3 Benchmark Price")
+        price = vintage_prices.get(source_name, df["id3_benchmark_price_eur_per_mwh"])
+        price = pd.Series(price).reset_index(drop=True).reindex(df.index).ffill().bfill().fillna(0.0)
 
-            df[trade_col] = np.where(mask, df["forecast_error_mwh"] * capture, 0.0)
-            df[price_col] = price
-            df[rev_col] = df[trade_col] * df[price_col]
+        trade_col = f"{key.lower()}_trade_mwh"
+        price_col = f"{key.lower()}_price_eur_per_mwh"
+        revenue_col = f"{key.lower()}_id_revenue_eur"
 
-            total_trade = total_trade + df[trade_col]
-            total_id_revenue = total_id_revenue + df[rev_col]
+        df[price_col] = price
 
-        df["total_id_trade_mwh"] = total_trade
-        df["id_revenue_eur"] = total_id_revenue
-        df["id_revenue_source"] = "model_from_forecast_error_and_price"
+        if use_uploaded_v4:
+            # Use v4 as the benchmark ID-correction contribution, then scale by
+            # DA position and auction capture. This keeps MVP v3 close to v2/v4
+            # while allowing the trader controls to affect the result.
+            df[revenue_col] = np.where(mask, v4_id_base.reindex(df.index).fillna(0.0) * da_factor * capture, 0.0)
+            df[trade_col] = safe_divide(df[revenue_col], price)
+        else:
+            # Model-only fallback: correction volume equals exposed forecast error
+            # multiplied by auction capture, valued at selected vintage price.
+            df[trade_col] = np.where(mask, df["strategy_error_mwh"] * capture, 0.0)
+            df[revenue_col] = df[trade_col] * price
 
-    df["remaining_imbalance_mwh"] = df["forecast_error_mwh"] - df["total_id_trade_mwh"]
+        total_trade_mwh = total_trade_mwh + df[trade_col]
+        total_id_revenue = total_id_revenue + df[revenue_col]
+
+        auction_rows.append(
+            {
+                "auction": key,
+                "window": f"{start}-{end}",
+                "use_auction": is_used,
+                "target_capture_pct": capture_pcts.get(key, 0.0),
+                "price_source": source_name,
+                "avg_price_eur_per_mwh": float(price.mean()),
+                "executed_trade_mwh": float(df[trade_col].sum()),
+                "id_revenue_eur": float(df[revenue_col].sum()),
+            }
+        )
+
+    df["total_id_trade_mwh"] = total_trade_mwh
+    df["id_revenue_eur"] = total_id_revenue
+    df["id_revenue_source"] = "uploaded_v4_scaled_by_da_position_and_auction_capture" if use_uploaded_v4 else "model_from_strategy_error_and_selected_vintage_prices"
+
+    df["remaining_imbalance_mwh"] = df["strategy_error_mwh"] - df["total_id_trade_mwh"]
 
     if use_uploaded_v5:
-        # v5 is the no-correction imbalance benchmark. For MVP simulation, residual imbalance
-        # is reduced by the capture factor. This is an approximation, but it gives an intuitive
-        # web control before the full Excel formula engine is migrated.
-        df["imbalance_settlement_eur"] = v5_imbalance_base.reindex(df.index).fillna(0.0).astype(float) * (1.0 - capture_factor)
-        df["imbalance_source"] = "uploaded_v5_scaled_by_remaining_capture"
+        # v5 is the no-correction imbalance benchmark.
+        # Residual imbalance is approximated by the non-captured share.
+        df["imbalance_settlement_eur"] = v5_imbalance_base.reindex(df.index).fillna(0.0).astype(float) * da_factor * (1.0 - capture_factor)
+        df["imbalance_source"] = "uploaded_v5_scaled_by_da_position_and_remaining_capture"
     else:
         df["imbalance_settlement_eur"] = df["remaining_imbalance_mwh"] * df["imbalance_price_eur_per_mwh"]
         df["imbalance_source"] = "model_remaining_mwh_times_imbalance_price"
@@ -737,12 +826,14 @@ def run_simulation(
     df["total_revenue_eur"] = df["da_revenue_eur"] + df["id_revenue_eur"] + df["imbalance_settlement_eur"]
 
     if v5_imbalance_base.abs().sum() > 0:
-        df["no_id_benchmark_eur"] = df["da_revenue_eur"] + v5_imbalance_base.reindex(df.index).fillna(0.0).astype(float)
+        df["no_id_benchmark_eur"] = df["da_revenue_eur"] + v5_imbalance_base.reindex(df.index).fillna(0.0).astype(float) * da_factor
     else:
-        df["no_id_benchmark_eur"] = df["da_revenue_eur"] + df["forecast_error_mwh"] * df["imbalance_price_eur_per_mwh"]
+        df["no_id_benchmark_eur"] = df["da_revenue_eur"] + df["strategy_error_mwh"] * df["imbalance_price_eur_per_mwh"]
 
     df["id_strategy_value_eur"] = df["total_revenue_eur"] - df["no_id_benchmark_eur"]
     df["id_plus_imbalance_eur"] = df["id_revenue_eur"] + df["imbalance_settlement_eur"]
+
+    auction_breakdown_df = pd.DataFrame(auction_rows)
 
     kpi = {
         "DA revenue EUR": float(df["da_revenue_eur"].sum()),
@@ -751,11 +842,12 @@ def run_simulation(
         "Total revenue EUR": float(df["total_revenue_eur"].sum()),
         "No-ID benchmark EUR": float(df["no_id_benchmark_eur"].sum()),
         "ID strategy value EUR": float(df["id_strategy_value_eur"].sum()),
-        "Total forecast error MWh": float(df["forecast_error_mwh"].sum()),
+        "Original forecast error MWh": float(df["forecast_error_mwh"].sum()),
+        "Strategy exposure MWh": float(df["strategy_error_mwh"].sum()),
         "Total executed ID trade MWh": float(df["total_id_trade_mwh"].sum()),
         "Remaining imbalance MWh": float(df["remaining_imbalance_mwh"].sum()),
     }
-    return df, kpi
+    return df, auction_breakdown_df, kpi
 
 
 # =============================================================================
@@ -807,13 +899,64 @@ def make_id_imbalance_chart(df: pd.DataFrame) -> go.Figure:
     return fig
 
 
-def make_excel_download(input_df: pd.DataFrame, settlement_df: pd.DataFrame, kpi: Dict[str, float], diagnostics: pd.DataFrame) -> bytes:
+def make_auction_chart(auction_breakdown_df: pd.DataFrame) -> go.Figure:
+    fig = go.Figure()
+    if auction_breakdown_df.empty:
+        return fig
+
+    fig.add_bar(
+        x=auction_breakdown_df["auction"],
+        y=auction_breakdown_df["id_revenue_eur"],
+        name="ID revenue EUR",
+    )
+    fig.update_layout(
+        title="ID Revenue by Auction Window",
+        height=360,
+        margin=dict(l=40, r=20, t=60, b=60),
+        yaxis=dict(title="EUR"),
+    )
+    return fig
+
+
+def make_cumulative_chart(df: pd.DataFrame) -> go.Figure:
+    fig = go.Figure()
+    fig.add_scatter(x=df["time_label"], y=df["da_revenue_eur"].cumsum(), mode="lines", name="Cumulative DA")
+    fig.add_scatter(x=df["time_label"], y=df["id_revenue_eur"].cumsum(), mode="lines", name="Cumulative ID")
+    fig.add_scatter(x=df["time_label"], y=df["imbalance_settlement_eur"].cumsum(), mode="lines", name="Cumulative imbalance")
+    fig.add_scatter(x=df["time_label"], y=df["total_revenue_eur"].cumsum(), mode="lines", name="Cumulative total")
+    fig.update_layout(
+        title="Cumulative Revenue Components",
+        height=430,
+        margin=dict(l=40, r=20, t=60, b=80),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+        xaxis=dict(tickmode="array", tickvals=df["time_label"].iloc[::12], tickangle=-45),
+        yaxis=dict(title="EUR"),
+    )
+    return fig
+
+
+def make_excel_download(
+    input_df: pd.DataFrame,
+    settlement_df: pd.DataFrame,
+    kpi: Dict[str, float],
+    source_status_df: pd.DataFrame,
+    auction_breakdown_df: pd.DataFrame,
+    v3_columns_df: pd.DataFrame,
+    v4_score_df: pd.DataFrame,
+    v5_score_df: pd.DataFrame,
+    epex_info_df: pd.DataFrame,
+) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         pd.DataFrame([kpi]).T.rename(columns={0: "value"}).to_excel(writer, sheet_name="KPI")
+        auction_breakdown_df.to_excel(writer, sheet_name="Auction_Breakdown", index=False)
+        source_status_df.to_excel(writer, sheet_name="Data_Source_Status", index=False)
         input_df.to_excel(writer, sheet_name="Input_Data", index=False)
         settlement_df.to_excel(writer, sheet_name="Settlement", index=False)
-        diagnostics.to_excel(writer, sheet_name="Diagnostics", index=False)
+        v3_columns_df.to_excel(writer, sheet_name="v3_Columns", index=False)
+        v4_score_df.to_excel(writer, sheet_name="v4_Detection", index=False)
+        v5_score_df.to_excel(writer, sheet_name="v5_Detection", index=False)
+        epex_info_df.to_excel(writer, sheet_name="EPEX_Mapping", index=False)
     return output.getvalue()
 
 
@@ -825,12 +968,19 @@ def fmt_mwh(value: float) -> str:
     return f"{value:,.1f} MWh"
 
 
+def fmt_pct(value: float) -> str:
+    return f"{value:.0f}%"
+
+
 # =============================================================================
 # UI
 # =============================================================================
 
-st.title("⚡ Convex Asset Trader Experience Board v17 - Web MVP")
-st.caption("Python / Streamlit version. Uses v3/v4/v5 and raw EPEX vintage files. v16 files are not used.")
+st.title("⚡ Convex Asset Trader Experience Board v17 - Web MVP v3")
+st.caption(
+    "Streamlit version of the v17 trader board concept. "
+    "Uses v3/v4/v5 and optional raw EPEX vintage files. v16 files are not used."
+)
 
 with st.sidebar:
     st.header("1. Upload CSV files")
@@ -848,8 +998,8 @@ with st.sidebar:
     asset = ASSETS[asset_label]
 
     st.header("3. Strategy")
-    strategy_mode = st.selectbox("Strategy Mode", ["DA + ID Correction", "DA Only", "ID Only"])
-    da_sold_pct = st.slider("DA Sold % of Forecast", 0.0, 100.0, 100.0, 1.0)
+    strategy_mode = st.selectbox("Strategy Mode", ["DA + ID Correction", "DA Only"])
+    da_sold_pct = st.slider("DA Sold %", 0.0, 100.0, 100.0, 1.0)
 
     st.header("4. Contribution source")
     contribution_source_mode = st.selectbox(
@@ -862,45 +1012,28 @@ with st.sidebar:
         index=0,
     )
 
-    st.header("5. ID capture")
-    price_options = [
-        "ID3 Benchmark Price",
-        "03:00 ID vintage",
-        "06:00 ID vintage",
-        "09:00 ID vintage",
-        "IDA3 vintage",
-        "IDA1 vintage",
-        "IDA2 vintage",
-    ]
-
+    st.header("5. ID auction controls")
     use_flags: Dict[str, bool] = {}
     capture_pcts: Dict[str, float] = {}
     price_sources: Dict[str, str] = {}
 
-    defaults = {
-        "PRE_IDA": (False, 0.0, "09:00 ID vintage"),
-        "IDA3": (True, 100.0, "IDA3 vintage"),
-        "IDA1": (True, 100.0, "IDA1 vintage"),
-        "IDA2": (True, 100.0, "IDA2 vintage"),
-    }
-
-    for key in ["PRE_IDA", "IDA3", "IDA1", "IDA2"]:
-        default_use, default_capture, default_price = defaults[key]
-        with st.expander(key, expanded=(key != "PRE_IDA")):
-            use_flags[key] = st.checkbox(f"Use {key}", value=default_use, key=f"use_{key}")
-            capture_pcts[key] = st.slider(
-                f"{key} Target Capture %",
+    for auction_key in ["IDA3", "IDA1", "IDA2"]:
+        default_use, default_capture, default_price = DEFAULT_AUCTION_SETTINGS[auction_key]
+        with st.expander(auction_key, expanded=True):
+            use_flags[auction_key] = st.checkbox(f"Use {auction_key}", value=default_use, key=f"use_{auction_key}")
+            capture_pcts[auction_key] = st.slider(
+                f"{auction_key} Target Capture %",
                 0.0,
                 100.0,
                 default_capture,
                 1.0,
-                key=f"capture_{key}",
+                key=f"capture_{auction_key}",
             )
-            price_sources[key] = st.selectbox(
-                f"{key} price source",
-                price_options,
-                index=price_options.index(default_price),
-                key=f"price_{key}",
+            price_sources[auction_key] = st.selectbox(
+                f"{auction_key} price source",
+                PRICE_OPTIONS,
+                index=PRICE_OPTIONS.index(default_price),
+                key=f"price_{auction_key}",
             )
 
 if v3_file is None:
@@ -922,7 +1055,7 @@ vintage_prices, epex_info_df = load_raw_vintage_prices(
     fallback=input_df["id3_benchmark_price_eur_per_mwh"],
 )
 
-settlement_df, kpi = run_simulation(
+settlement_df, auction_breakdown_df, kpi = run_simulation(
     input_df=input_df,
     vintage_prices=vintage_prices,
     strategy_mode=strategy_mode,
@@ -934,6 +1067,40 @@ settlement_df, kpi = run_simulation(
     v4_id_base=v4_id_base,
     v5_imbalance_base=v5_imbalance_base,
 )
+
+source_rows = [
+    {
+        "item": "v3 DA revenue",
+        "status": "ok",
+        "selected_column": sources.get("DA revenue column"),
+        "sum": float(input_df["da_revenue_eur_5min"].sum()),
+    },
+    {
+        "item": "v4 ID contribution",
+        "status": "ok" if v4_info.get("selected_column") not in ["not uploaded", "not detected"] else str(v4_info.get("selected_column")),
+        "selected_column": v4_info.get("selected_column"),
+        "sum": v4_info.get("sum", 0.0),
+    },
+    {
+        "item": "v5 imbalance contribution",
+        "status": "ok" if v5_info.get("selected_column") not in ["not uploaded", "not detected"] else str(v5_info.get("selected_column")),
+        "selected_column": v5_info.get("selected_column"),
+        "sum": v5_info.get("sum", 0.0),
+    },
+    {
+        "item": "ID revenue source used",
+        "status": str(settlement_df["id_revenue_source"].iloc[0]),
+        "selected_column": "",
+        "sum": float(settlement_df["id_revenue_eur"].sum()),
+    },
+    {
+        "item": "Imbalance source used",
+        "status": str(settlement_df["imbalance_source"].iloc[0]),
+        "selected_column": "",
+        "sum": float(settlement_df["imbalance_settlement_eur"].sum()),
+    },
+]
+source_status_df = pd.DataFrame(source_rows)
 
 st.subheader(f"Trader Board Summary - {asset_label}")
 
@@ -950,30 +1117,71 @@ kpi_cols2[2].metric("Executed ID Trade", fmt_mwh(kpi["Total executed ID trade MW
 kpi_cols2[3].metric("Remaining Imbalance", fmt_mwh(kpi["Remaining imbalance MWh"]))
 
 with st.expander("Current data-source status", expanded=True):
-    source_rows = [
-        {"item": "v3 DA revenue", "status": "ok", "selected_column": sources.get("DA revenue column"), "sum": float(input_df["da_revenue_eur_5min"].sum())},
-        {"item": "v4 ID contribution", "status": "ok" if v4_info.get("selected_column") not in ["not uploaded", "not detected"] else str(v4_info.get("selected_column")), "selected_column": v4_info.get("selected_column"), "sum": v4_info.get("sum", 0.0)},
-        {"item": "v5 imbalance contribution", "status": "ok" if v5_info.get("selected_column") not in ["not uploaded", "not detected"] else str(v5_info.get("selected_column")), "selected_column": v5_info.get("selected_column"), "sum": v5_info.get("sum", 0.0)},
-        {"item": "ID revenue source used", "status": str(settlement_df["id_revenue_source"].iloc[0]), "selected_column": "", "sum": float(settlement_df["id_revenue_eur"].sum())},
-        {"item": "Imbalance source used", "status": str(settlement_df["imbalance_source"].iloc[0]), "selected_column": "", "sum": float(settlement_df["imbalance_settlement_eur"].sum())},
-    ]
-    st.dataframe(pd.DataFrame(source_rows), use_container_width=True)
+    st.dataframe(source_status_df, use_container_width=True)
 
 st.divider()
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "Graphs",
-    "Settlement table",
-    "Input check",
-    "Column diagnostics",
-    "Download",
-])
+left, right = st.columns([0.85, 1.15])
+with left:
+    st.markdown("### Trader Decision Board")
+    decision_rows = [
+        {"metric": "Asset", "value": asset.display_name},
+        {"metric": "Strategy Mode", "value": strategy_mode},
+        {"metric": "DA Sold %", "value": fmt_pct(da_sold_pct)},
+        {"metric": "Contribution Source", "value": contribution_source_mode},
+    ]
+    st.dataframe(pd.DataFrame(decision_rows), use_container_width=True, hide_index=True)
+
+with right:
+    st.markdown("### Auction Settings / Results")
+    st.dataframe(auction_breakdown_df, use_container_width=True, hide_index=True)
+
+st.divider()
+
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+    [
+        "Graphs",
+        "Trader Decision Board",
+        "Settlement table",
+        "Input check",
+        "Column diagnostics",
+        "Download",
+    ]
+)
 
 with tab1:
     st.plotly_chart(make_da_chart(settlement_df), use_container_width=True)
     st.plotly_chart(make_id_imbalance_chart(settlement_df), use_container_width=True)
+    c1, c2 = st.columns(2)
+    with c1:
+        st.plotly_chart(make_auction_chart(auction_breakdown_df), use_container_width=True)
+    with c2:
+        st.plotly_chart(make_cumulative_chart(settlement_df), use_container_width=True)
 
 with tab2:
+    c1, c2 = st.columns([0.8, 1.2])
+    with c1:
+        st.markdown("#### Strategy Inputs")
+        strategy_table = pd.DataFrame(
+            [
+                {"item": "Asset", "value": asset_label},
+                {"item": "Strategy Mode", "value": strategy_mode},
+                {"item": "DA Sold %", "value": fmt_pct(da_sold_pct)},
+                {"item": "ID / imbalance source", "value": contribution_source_mode},
+                {"item": "Original forecast error", "value": fmt_mwh(kpi["Original forecast error MWh"])},
+                {"item": "Strategy exposure", "value": fmt_mwh(kpi["Strategy exposure MWh"])},
+            ]
+        )
+        st.dataframe(strategy_table, use_container_width=True, hide_index=True)
+    with c2:
+        st.markdown("#### KPI")
+        kpi_table = pd.DataFrame([{"metric": k, "value": v} for k, v in kpi.items()])
+        st.dataframe(kpi_table, use_container_width=True, hide_index=True)
+
+    st.markdown("#### Auction Breakdown")
+    st.dataframe(auction_breakdown_df, use_container_width=True, hide_index=True)
+
+with tab3:
     display_cols = [
         "time_label",
         "da_revenue_eur",
@@ -982,26 +1190,28 @@ with tab2:
         "id_plus_imbalance_eur",
         "total_revenue_eur",
         "forecast_error_mwh",
+        "strategy_error_mwh",
         "capture_factor",
         "total_id_trade_mwh",
         "remaining_imbalance_mwh",
     ]
-    st.dataframe(settlement_df[display_cols], use_container_width=True, height=500)
+    st.dataframe(settlement_df[display_cols], use_container_width=True, height=520)
 
-with tab3:
+with tab4:
     st.write("Detected v3 source columns")
     st.dataframe(pd.DataFrame([sources]).T.rename(columns={0: "detected_column"}), use_container_width=True)
     st.write("Input data preview")
-    st.dataframe(input_df.head(20), use_container_width=True)
+    st.dataframe(input_df.head(30), use_container_width=True)
 
-with tab4:
+with tab5:
     st.write("v3 normalized columns")
-    st.dataframe(pd.DataFrame({"v3_columns": list(v3_norm_df.columns)}), use_container_width=True, height=220)
+    v3_columns_df = pd.DataFrame({"v3_columns": list(v3_norm_df.columns)})
+    st.dataframe(v3_columns_df, use_container_width=True, height=220)
 
     st.write("v4 ID contribution detection")
     st.json(v4_info)
     if not v4_score_df.empty:
-        st.dataframe(v4_score_df.head(30), use_container_width=True, height=300)
+        st.dataframe(v4_score_df.head(40), use_container_width=True, height=300)
     elif v4_file is None:
         st.info("v4 file was not uploaded.")
     else:
@@ -1010,7 +1220,7 @@ with tab4:
     st.write("v5 imbalance contribution detection")
     st.json(v5_info)
     if not v5_score_df.empty:
-        st.dataframe(v5_score_df.head(30), use_container_width=True, height=300)
+        st.dataframe(v5_score_df.head(40), use_container_width=True, height=300)
     elif v5_file is None:
         st.info("v5 file was not uploaded.")
     else:
@@ -1022,18 +1232,28 @@ with tab4:
     else:
         st.dataframe(epex_info_df, use_container_width=True)
 
-with tab5:
-    diagnostics = pd.DataFrame(source_rows)
-    excel_bytes = make_excel_download(input_df, settlement_df, kpi, diagnostics)
+with tab6:
+    v3_columns_df = pd.DataFrame({"v3_columns": list(v3_norm_df.columns)})
+    excel_bytes = make_excel_download(
+        input_df=input_df,
+        settlement_df=settlement_df,
+        kpi=kpi,
+        source_status_df=source_status_df,
+        auction_breakdown_df=auction_breakdown_df,
+        v3_columns_df=v3_columns_df,
+        v4_score_df=v4_score_df,
+        v5_score_df=v5_score_df,
+        epex_info_df=epex_info_df,
+    )
     st.download_button(
         label="Download calculated result as Excel",
         data=excel_bytes,
-        file_name="v17_streamlit_mvp_v2_result.xlsx",
+        file_name="v17_streamlit_mvp_v3_result.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
     st.download_button(
         label="Download settlement table as CSV",
         data=settlement_df.to_csv(index=False).encode("utf-8-sig"),
-        file_name="v17_streamlit_mvp_v2_settlement.csv",
+        file_name="v17_streamlit_mvp_v3_settlement.csv",
         mime="text/csv",
     )
