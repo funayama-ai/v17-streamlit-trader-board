@@ -8,11 +8,12 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
 
 # =============================================================================
-# Convex Asset Trader Experience Board v17 - Streamlit Web MVP v3.5
+# Convex Asset Trader Experience Board v17 - Streamlit Web MVP v3.6
 # =============================================================================
 # Purpose:
 #   Web-app MVP for the PyCharm / Excel v17 trader board.
@@ -36,7 +37,7 @@ import streamlit as st
 #   - Executed ID Trade MWh no longer becomes 0 just because raw EPEX prices are missing.
 #   - Uploaded v4 contribution mode uses forecast-error capture as an approximate MWh basis.
 #   - Auction price status shows not loaded when the selected raw EPEX price is unavailable.
-#   - Imbalance wording is shown as Imbalance PnL in the UI.
+#   - Imbalance wording is shown as Imbalance Settlement EUR in the UI.
 #   - Cumulative chart spacing is adjusted to avoid title / legend overlap.
 #
 # Main fixes in v3.3:
@@ -44,6 +45,10 @@ import streamlit as st
 #   - Plotly modebar removes zoom / pan / select / lasso controls.
 #   - DA positive revenue uses a light orange color.
 #   - DA negative revenue uses a light blue color.
+#
+# Main fixes in v3.6:
+#   - UI wording standardized as Imbalance Settlement EUR.
+#   - DA Only mode shows an additional settlement detail chart with 5-min bars and cumulative settlement.
 #
 # Required:
 #   - v3_da_revenue_YYYY_MM_DD.csv
@@ -54,7 +59,7 @@ import streamlit as st
 # =============================================================================
 
 st.set_page_config(
-    page_title="v17 Trader Board Web MVP v3.5",
+    page_title="v17 Trader Board Web MVP v3.6",
     page_icon="⚡",
     layout="wide",
 )
@@ -1044,7 +1049,7 @@ def run_simulation(
     kpi = {
         "DA revenue EUR": float(df["da_revenue_eur"].sum()),
         "ID revenue EUR": float(df["id_revenue_eur"].sum()),
-        "Imbalance PnL EUR": float(df["imbalance_settlement_eur"].sum()),
+        "Imbalance Settlement EUR": float(df["imbalance_settlement_eur"].sum()),
         "Total revenue EUR": float(df["total_revenue_eur"].sum()),
         "No-ID benchmark EUR": float(df["no_id_benchmark_eur"].sum()),
         "ID strategy value EUR": float(df["id_strategy_value_eur"].sum()),
@@ -1103,11 +1108,11 @@ def make_id_imbalance_chart(df: pd.DataFrame) -> go.Figure:
         negative_imbalance_color = DA_ONLY_IMBALANCE_NEGATIVE_COLOR
         chart_title = "DA-only Imbalance Settlement EUR - 5-min"
     else:
-        positive_imbalance_name = "Positive residual imbalance PnL"
-        negative_imbalance_name = "Negative residual imbalance PnL"
+        positive_imbalance_name = "Positive residual imbalance settlement EUR"
+        negative_imbalance_name = "Negative residual imbalance settlement EUR"
         positive_imbalance_color = DEFAULT_IMBALANCE_POSITIVE_COLOR
         negative_imbalance_color = DEFAULT_IMBALANCE_NEGATIVE_COLOR
-        chart_title = "ID Revenue / Residual Imbalance PnL - 5-min"
+        chart_title = "ID Revenue / Residual Imbalance Settlement EUR - 5-min"
 
     fig = go.Figure()
     fig.add_bar(x=df["time_label"], y=id_pos, name="Positive ID contribution", marker_color=ID_POSITIVE_COLOR)
@@ -1125,6 +1130,90 @@ def make_id_imbalance_chart(df: pd.DataFrame) -> go.Figure:
         yaxis=dict(range=[y_min, y_max], title="EUR per 5-min interval"),
     )
     return fig
+
+
+def make_da_only_settlement_detail_chart(df: pd.DataFrame) -> go.Figure:
+    """Detailed DA-only imbalance settlement chart.
+
+    The main DA-only graph shows the 5-minute settlement bars. This detail chart
+    keeps those bars and adds the cumulative imbalance settlement line so that
+    the user can see both interval-level impact and daily accumulation.
+    """
+    settlement = pd.to_numeric(df["imbalance_settlement_eur"], errors="coerce").fillna(0.0)
+    pos = settlement.clip(lower=0)
+    neg = settlement.clip(upper=0)
+    cumulative = settlement.cumsum()
+
+    if "remaining_imbalance_mwh" in df.columns:
+        net_remaining = pd.to_numeric(df["remaining_imbalance_mwh"], errors="coerce").fillna(0.0)
+    else:
+        net_remaining = pd.Series(0.0, index=df.index)
+
+    if "remaining_imbalance_abs_mwh" in df.columns:
+        abs_remaining = pd.to_numeric(df["remaining_imbalance_abs_mwh"], errors="coerce").fillna(net_remaining.abs())
+    else:
+        abs_remaining = net_remaining.abs()
+
+    customdata = np.column_stack(
+        [
+            net_remaining.to_numpy(dtype=float),
+            abs_remaining.to_numpy(dtype=float),
+            cumulative.to_numpy(dtype=float),
+        ]
+    )
+
+    y_min, y_max = nice_axis_limits(settlement)
+
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    hover_template = (
+        "Time: %{x}<br>"
+        "Settlement: %{y:,.0f} EUR<br>"
+        "Net remaining imbalance: %{customdata[0]:,.2f} MWh<br>"
+        "Abs remaining imbalance: %{customdata[1]:,.2f} MWh<br>"
+        "Cumulative settlement: %{customdata[2]:,.0f} EUR"
+        "<extra></extra>"
+    )
+
+    fig.add_bar(
+        x=df["time_label"],
+        y=pos,
+        name="Positive Imbalance Settlement EUR",
+        marker_color=DA_ONLY_IMBALANCE_POSITIVE_COLOR,
+        customdata=customdata,
+        hovertemplate=hover_template,
+        secondary_y=False,
+    )
+    fig.add_bar(
+        x=df["time_label"],
+        y=neg,
+        name="Negative Imbalance Settlement EUR",
+        marker_color=DA_ONLY_IMBALANCE_NEGATIVE_COLOR,
+        customdata=customdata,
+        hovertemplate=hover_template,
+        secondary_y=False,
+    )
+    fig.add_scatter(
+        x=df["time_label"],
+        y=cumulative,
+        mode="lines",
+        name="Cumulative Imbalance Settlement EUR",
+        line=dict(color="rgba(46, 125, 50, 0.95)", width=2.5),
+        secondary_y=True,
+    )
+
+    fig.update_layout(
+        title="DA-only Imbalance Settlement Detail - 5-min and cumulative",
+        dragmode=False,
+        barmode="relative",
+        height=420,
+        margin=dict(l=55, r=60, t=85, b=80),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+        xaxis=dict(tickmode="array", tickvals=df["time_label"].iloc[::12], tickangle=-45),
+    )
+    fig.update_yaxes(title_text="Settlement EUR per 5-min interval", range=[y_min, y_max], secondary_y=False)
+    fig.update_yaxes(title_text="Cumulative settlement EUR", secondary_y=True)
+    return fig
+
 
 def make_auction_chart(auction_breakdown_df: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
@@ -1151,7 +1240,7 @@ def make_cumulative_chart(df: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
     fig.add_scatter(x=df["time_label"], y=df["da_revenue_eur"].cumsum(), mode="lines", name="DA")
     fig.add_scatter(x=df["time_label"], y=df["id_revenue_eur"].cumsum(), mode="lines", name="ID")
-    fig.add_scatter(x=df["time_label"], y=df["imbalance_settlement_eur"].cumsum(), mode="lines", name="Imbalance PnL")
+    fig.add_scatter(x=df["time_label"], y=df["imbalance_settlement_eur"].cumsum(), mode="lines", name="Imbalance Settlement EUR")
     fig.add_scatter(x=df["time_label"], y=df["total_revenue_eur"].cumsum(), mode="lines", name="Total")
     fig.update_layout(
         height=420,
@@ -1233,7 +1322,7 @@ def auction_display_table(auction_breakdown_df: pd.DataFrame) -> pd.DataFrame:
 # UI
 # =============================================================================
 
-st.title("⚡ Convex Asset Trader Experience Board v17 - Web MVP v3.5")
+st.title("⚡ Convex Asset Trader Experience Board v17 - Web MVP v3.6")
 st.caption(
     "Streamlit version of the v17 trader board concept. "
     "Uses v3/v4/v5 and optional raw EPEX vintage files. v16 files are not used."
@@ -1347,7 +1436,7 @@ source_rows = [
         "sum": v4_info.get("sum", 0.0),
     },
     {
-        "item": "v5 imbalance PnL contribution",
+        "item": "v5 imbalance settlement EUR contribution",
         "status": "ok" if v5_info.get("selected_column") not in ["not uploaded", "not detected"] else str(v5_info.get("selected_column")),
         "selected_column": v5_info.get("selected_column"),
         "sum": v5_info.get("sum", 0.0),
@@ -1365,7 +1454,7 @@ source_rows = [
         "sum": float(settlement_df["id_revenue_eur"].sum()),
     },
     {
-        "item": "Imbalance PnL source used",
+        "item": "Imbalance Settlement EUR source used",
         "status": str(settlement_df["imbalance_source"].iloc[0]),
         "selected_column": "",
         "sum": float(settlement_df["imbalance_settlement_eur"].sum()),
@@ -1378,7 +1467,7 @@ st.subheader(f"Trader Board Summary - {asset_label}")
 kpi_cols = st.columns(4)
 kpi_cols[0].metric("DA Revenue", fmt_eur(kpi["DA revenue EUR"]))
 kpi_cols[1].metric("ID Revenue", fmt_eur(kpi["ID revenue EUR"]))
-kpi_cols[2].metric("Imbalance PnL", fmt_eur(kpi["Imbalance PnL EUR"]))
+kpi_cols[2].metric("Imbalance Settlement EUR", fmt_eur(kpi["Imbalance Settlement EUR"]))
 kpi_cols[3].metric("Total Revenue", fmt_eur(kpi["Total revenue EUR"]))
 
 kpi_cols2 = st.columns(4)
@@ -1436,8 +1525,12 @@ with tab1:
     st.plotly_chart(make_id_imbalance_chart(settlement_df), use_container_width=True, config=PLOTLY_CONFIG)
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown("#### ID Revenue by Auction Window")
-        st.plotly_chart(make_auction_chart(auction_breakdown_df), use_container_width=True, config=PLOTLY_CONFIG)
+        if strategy_mode == "DA Only":
+            st.markdown("#### DA-only Imbalance Settlement Detail")
+            st.plotly_chart(make_da_only_settlement_detail_chart(settlement_df), use_container_width=True, config=PLOTLY_CONFIG)
+        else:
+            st.markdown("#### ID Revenue by Auction Window")
+            st.plotly_chart(make_auction_chart(auction_breakdown_df), use_container_width=True, config=PLOTLY_CONFIG)
     with c2:
         st.markdown("#### Cumulative Revenue Components")
         st.plotly_chart(make_cumulative_chart(settlement_df), use_container_width=True, config=PLOTLY_CONFIG)
@@ -1503,7 +1596,7 @@ with tab5:
     else:
         st.warning("No numeric v4 columns were detected.")
 
-    st.write("v5 imbalance PnL contribution detection")
+    st.write("v5 imbalance settlement EUR contribution detection")
     st.json(v5_info)
     if not v5_score_df.empty:
         st.dataframe(v5_score_df.head(40), use_container_width=True, height=300)
@@ -1533,12 +1626,12 @@ with tab6:
     st.download_button(
         label="Download calculated result as Excel",
         data=excel_bytes,
-        file_name="v17_streamlit_mvp_v3_5_result.xlsx",
+        file_name="v17_streamlit_mvp_v3_6_result.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
     st.download_button(
         label="Download settlement table as CSV",
         data=settlement_df.to_csv(index=False).encode("utf-8-sig"),
-        file_name="v17_streamlit_mvp_v3_5_settlement.csv",
+        file_name="v17_streamlit_mvp_v3_6_settlement.csv",
         mime="text/csv",
     )
