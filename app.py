@@ -13,7 +13,7 @@ import streamlit as st
 
 
 # =============================================================================
-# Convex Asset Trader Experience Board v17 - Streamlit Web MVP v3.8
+# Convex Asset Trader Experience Board v17 - Streamlit Web MVP v3.9
 # =============================================================================
 # Purpose:
 #   Web-app MVP for the PyCharm / Excel v17 trader board.
@@ -56,7 +56,12 @@ import streamlit as st
 # Main fixes in v3.8:
 #   - DA + ID Correction logic now keeps explicit no-ID imbalance settlement.
 #   - Residual imbalance settlement is calculated from the residual imbalance ratio.
-#   - Strategy Result Waterfall is added for Excel v17-style comparison.
+#   - DA-only benchmark and ID-correction case are compared explicitly.
+#
+# Main fixes in v3.9:
+#   - Positive residual imbalance settlement EUR uses green.
+#   - Negative residual imbalance settlement EUR uses pale green.
+#   - DA-only imbalance settlement colors are preserved.
 #
 # Required:
 #   - v3_da_revenue_YYYY_MM_DD.csv
@@ -67,7 +72,7 @@ import streamlit as st
 # =============================================================================
 
 st.set_page_config(
-    page_title="v17 Trader Board Web MVP v3.8",
+    page_title="v17 Trader Board Web MVP v3.9",
     page_icon="⚡",
     layout="wide",
 )
@@ -98,8 +103,8 @@ DA_NEGATIVE_COLOR = "rgba(144, 202, 249, 0.75)"  # light blue
 # DA-only mode: show the no-correction imbalance settlement in light green.
 DA_ONLY_IMBALANCE_POSITIVE_COLOR = "rgba(129, 199, 132, 0.72)"  # light green
 DA_ONLY_IMBALANCE_NEGATIVE_COLOR = "rgba(165, 214, 167, 0.72)"  # pale green
-DEFAULT_IMBALANCE_POSITIVE_COLOR = "rgba(255, 45, 45, 0.88)"   # red
-DEFAULT_IMBALANCE_NEGATIVE_COLOR = "rgba(255, 160, 160, 0.75)"  # pale red
+DEFAULT_IMBALANCE_POSITIVE_COLOR = "rgba(67, 160, 71, 0.85)"    # green
+DEFAULT_IMBALANCE_NEGATIVE_COLOR = "rgba(165, 214, 167, 0.72)"  # pale green
 ID_POSITIVE_COLOR = "rgba(0, 102, 204, 0.95)"                  # blue
 ID_NEGATIVE_COLOR = "rgba(144, 202, 249, 0.85)"                # light blue
 
@@ -1477,7 +1482,7 @@ def auction_display_table(auction_breakdown_df: pd.DataFrame) -> pd.DataFrame:
 # UI
 # =============================================================================
 
-st.title("⚡ Convex Asset Trader Experience Board v17 - Web MVP v3.8")
+st.title("⚡ Convex Asset Trader Experience Board v17 - Web MVP v3.9")
 st.caption(
     "Streamlit version of the v17 trader board concept. "
     "Uses v3/v4/v5 and optional raw EPEX vintage files. v16 files are not used."
@@ -1795,12 +1800,12 @@ with tab6:
     st.download_button(
         label="Download calculated result as Excel",
         data=excel_bytes,
-        file_name="v17_streamlit_mvp_v3_8_result.xlsx",
+        file_name="v17_streamlit_mvp_v3_9_result.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
     st.download_button(
         label="Download settlement table as CSV",
         data=settlement_df.to_csv(index=False).encode("utf-8-sig"),
-        file_name="v17_streamlit_mvp_v3_8_settlement.csv",
+        file_name="v17_streamlit_mvp_v3_9_settlement.csv",
         mime="text/csv",
     )
