@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import re
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -13,7 +14,7 @@ import streamlit as st
 
 
 # =============================================================================
-# Convex Asset Trader Experience Board v17 - Streamlit Web MVP v3.10
+# Convex Asset Trader Experience Board v17 - Streamlit Web MVP v3.11
 # =============================================================================
 # Purpose:
 #   Web-app MVP for the PyCharm / Excel v17 trader board.
@@ -67,6 +68,11 @@ import streamlit as st
 #   - Negative residual imbalance settlement EUR uses pale green.
 #   - DA-only imbalance settlement colors are preserved.
 #
+# Main fixes in v3.11:
+#   - Adds built-in demo data mode for sharing the Streamlit URL with graphs already visible.
+#   - Demo files are read from data/demo_2026_06_22/ in the GitHub repository.
+#   - Upload custom CSV mode is still available for user-provided data.
+#
 # Required:
 #   - v3_da_revenue_YYYY_MM_DD.csv
 # Optional:
@@ -76,7 +82,7 @@ import streamlit as st
 # =============================================================================
 
 st.set_page_config(
-    page_title="v17 Trader Board Web MVP v3.10",
+    page_title="v17 Trader Board Web MVP v3.11",
     page_icon="⚡",
     layout="wide",
 )
@@ -111,6 +117,37 @@ DEFAULT_IMBALANCE_POSITIVE_COLOR = "rgba(67, 160, 71, 0.85)"    # green
 DEFAULT_IMBALANCE_NEGATIVE_COLOR = "rgba(165, 214, 167, 0.72)"  # pale green
 ID_POSITIVE_COLOR = "rgba(0, 102, 204, 0.95)"                  # blue
 ID_NEGATIVE_COLOR = "rgba(144, 202, 249, 0.85)"                # light blue
+
+# =============================================================================
+# Built-in demo data settings
+# =============================================================================
+
+APP_DIR = Path(__file__).resolve().parent
+DEMO_DATA_DIR = APP_DIR / "data" / "demo_2026_06_22"
+DEMO_FILES = {
+    "v3": DEMO_DATA_DIR / "v3_da_revenue_2026_06_22.csv",
+    "v4": DEMO_DATA_DIR / "v4_id_correction_pnl_2026_06_22.csv",
+    "v5": DEMO_DATA_DIR / "v5_no_correction_imbalance_pnl_2026_06_22.csv",
+}
+
+
+class LocalDemoFile:
+    """Small wrapper so local demo CSVs behave like Streamlit UploadedFile objects."""
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self.name = self.path.name
+
+    def getvalue(self) -> bytes:
+        return self.path.read_bytes()
+
+
+def demo_files_available() -> bool:
+    return all(path.exists() and path.is_file() for path in DEMO_FILES.values())
+
+
+def missing_demo_files() -> List[str]:
+    return [str(path.as_posix()) for path in DEMO_FILES.values() if not path.exists()]
 
 
 @dataclass(frozen=True)
@@ -1486,22 +1523,63 @@ def auction_display_table(auction_breakdown_df: pd.DataFrame) -> pd.DataFrame:
 # UI
 # =============================================================================
 
-st.title("⚡ Convex Asset Trader Experience Board v17 - Web MVP v3.10")
+st.title("⚡ Convex Asset Trader Experience Board v17 - Web MVP v3.11")
 st.caption(
     "Streamlit version of the v17 trader board concept. "
     "Uses v3/v4/v5 and optional raw EPEX vintage files. v16 files are not used."
 )
 
+demo_available = demo_files_available()
+
 with st.sidebar:
-    st.header("1. Upload CSV files")
-    v3_file = st.file_uploader("Required: v3_da_revenue_YYYY_MM_DD.csv", type=["csv"])
-    v4_file = st.file_uploader("Optional: v4_id_correction_pnl_YYYY_MM_DD.csv", type=["csv"])
-    v5_file = st.file_uploader("Optional: v5_no_correction_imbalance_pnl_YYYY_MM_DD.csv", type=["csv"])
-    epex_files = st.file_uploader(
-        "Optional: raw EPEX ID vintage CSVs",
-        type=["csv"],
-        accept_multiple_files=True,
+    st.header("0. Data mode")
+    data_mode_options = ["Use built-in demo data", "Upload custom CSV files"]
+    data_mode = st.radio(
+        "Data source",
+        data_mode_options,
+        index=0 if demo_available else 1,
+        help=(
+            "Use built-in demo data for a shareable app view. "
+            "Switch to upload mode when testing another day or asset file set."
+        ),
     )
+
+    st.header("1. Data files")
+    if data_mode == "Use built-in demo data":
+        if demo_available:
+            st.success("Using built-in demo data: 2026-06-22")
+            v3_file = LocalDemoFile(DEMO_FILES["v3"])
+            v4_file = LocalDemoFile(DEMO_FILES["v4"])
+            v5_file = LocalDemoFile(DEMO_FILES["v5"])
+            st.caption("Loaded from GitHub repository:")
+            st.code(
+                "data/demo_2026_06_22/\n"
+                "  v3_da_revenue_2026_06_22.csv\n"
+                "  v4_id_correction_pnl_2026_06_22.csv\n"
+                "  v5_no_correction_imbalance_pnl_2026_06_22.csv",
+                language="text",
+            )
+        else:
+            v3_file = None
+            v4_file = None
+            v5_file = None
+            st.error("Built-in demo files were not found in the repository.")
+            st.caption("Missing files:")
+            st.code("\n".join(missing_demo_files()), language="text")
+        epex_files = st.file_uploader(
+            "Optional: raw EPEX ID vintage CSVs",
+            type=["csv"],
+            accept_multiple_files=True,
+        )
+    else:
+        v3_file = st.file_uploader("Required: v3_da_revenue_YYYY_MM_DD.csv", type=["csv"])
+        v4_file = st.file_uploader("Optional: v4_id_correction_pnl_YYYY_MM_DD.csv", type=["csv"])
+        v5_file = st.file_uploader("Optional: v5_no_correction_imbalance_pnl_YYYY_MM_DD.csv", type=["csv"])
+        epex_files = st.file_uploader(
+            "Optional: raw EPEX ID vintage CSVs",
+            type=["csv"],
+            accept_multiple_files=True,
+        )
 
     st.header("2. Asset")
     asset_label = st.selectbox("Asset", list(ASSETS.keys()))
@@ -1552,7 +1630,13 @@ with st.sidebar:
             )
 
 if v3_file is None:
-    st.info("Upload v3_da_revenue CSV to start. v4/v5 and raw EPEX files can be added after that.")
+    if data_mode == "Use built-in demo data":
+        st.info(
+            "Built-in demo mode is selected, but the demo CSV files are missing. "
+            "Add the files under data/demo_2026_06_22/ in GitHub, or switch to Upload custom CSV files."
+        )
+    else:
+        st.info("Upload v3_da_revenue CSV to start. v4/v5 and raw EPEX files can be added after that.")
     st.stop()
 
 try:
@@ -1592,6 +1676,12 @@ settlement_df, auction_breakdown_df, kpi = run_simulation(
 )
 
 source_rows = [
+    {
+        "item": "Data mode",
+        "status": data_mode,
+        "selected_column": "built-in demo files" if data_mode == "Use built-in demo data" else "uploaded files",
+        "sum": np.nan,
+    },
     {
         "item": "v3 DA revenue",
         "status": "ok",
@@ -1675,6 +1765,7 @@ with left:
         {"metric": "Asset", "value": asset.display_name},
         {"metric": "Strategy Mode", "value": strategy_mode},
         {"metric": "DA Sold %", "value": fmt_pct(da_sold_pct)},
+        {"metric": "Data Mode", "value": data_mode},
         {"metric": "Contribution Source", "value": contribution_source_mode},
     ]
     st.dataframe(pd.DataFrame(decision_rows), use_container_width=True, hide_index=True)
@@ -1721,6 +1812,7 @@ with tab2:
                 {"item": "Asset", "value": asset_label},
                 {"item": "Strategy Mode", "value": strategy_mode},
                 {"item": "DA Sold %", "value": fmt_pct(da_sold_pct)},
+                {"item": "Data Mode", "value": data_mode},
                 {"item": "ID / imbalance source", "value": contribution_source_mode},
                 {"item": "Original forecast error", "value": fmt_mwh(kpi["Original forecast error MWh"])},
                 {"item": "Strategy exposure", "value": fmt_mwh(kpi["Strategy exposure MWh"])},
@@ -1809,12 +1901,12 @@ with tab6:
     st.download_button(
         label="Download calculated result as Excel",
         data=excel_bytes,
-        file_name="v17_streamlit_mvp_v3_10_result.xlsx",
+        file_name="v17_streamlit_mvp_v3_11_result.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
     st.download_button(
         label="Download settlement table as CSV",
         data=settlement_df.to_csv(index=False).encode("utf-8-sig"),
-        file_name="v17_streamlit_mvp_v3_10_settlement.csv",
+        file_name="v17_streamlit_mvp_v3_11_settlement.csv",
         mime="text/csv",
     )
