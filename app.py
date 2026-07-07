@@ -13,7 +13,7 @@ import streamlit as st
 
 
 # =============================================================================
-# Convex Asset Trader Experience Board v17 - Streamlit Web MVP v3.9
+# Convex Asset Trader Experience Board v17 - Streamlit Web MVP v3.10
 # =============================================================================
 # Purpose:
 #   Web-app MVP for the PyCharm / Excel v17 trader board.
@@ -59,6 +59,10 @@ import streamlit as st
 #   - DA-only benchmark and ID-correction case are compared explicitly.
 #
 # Main fixes in v3.9:
+#   - Positive residual imbalance settlement EUR is green.
+#   - Negative residual imbalance settlement EUR is light green.
+#
+# Main fixes in v3.10:
 #   - Positive residual imbalance settlement EUR uses green.
 #   - Negative residual imbalance settlement EUR uses pale green.
 #   - DA-only imbalance settlement colors are preserved.
@@ -72,7 +76,7 @@ import streamlit as st
 # =============================================================================
 
 st.set_page_config(
-    page_title="v17 Trader Board Web MVP v3.9",
+    page_title="v17 Trader Board Web MVP v3.10",
     page_icon="⚡",
     layout="wide",
 )
@@ -1482,7 +1486,7 @@ def auction_display_table(auction_breakdown_df: pd.DataFrame) -> pd.DataFrame:
 # UI
 # =============================================================================
 
-st.title("⚡ Convex Asset Trader Experience Board v17 - Web MVP v3.9")
+st.title("⚡ Convex Asset Trader Experience Board v17 - Web MVP v3.10")
 st.caption(
     "Streamlit version of the v17 trader board concept. "
     "Uses v3/v4/v5 and optional raw EPEX vintage files. v16 files are not used."
@@ -1535,11 +1539,16 @@ with st.sidebar:
                 1.0,
                 key=f"capture_{auction_key}",
             )
-            price_sources[auction_key] = st.selectbox(
+            # v3.10 change:
+            # Streamlit's selectbox dropdown can be clipped at the bottom of the sidebar,
+            # especially for IDA2. A radio control avoids the hidden-scroll problem and
+            # keeps all price-source options directly visible in the sidebar.
+            price_sources[auction_key] = st.radio(
                 f"{auction_key} price source",
                 PRICE_OPTIONS,
                 index=PRICE_OPTIONS.index(default_price),
                 key=f"price_{auction_key}",
+                horizontal=False,
             )
 
 if v3_file is None:
@@ -1800,12 +1809,12 @@ with tab6:
     st.download_button(
         label="Download calculated result as Excel",
         data=excel_bytes,
-        file_name="v17_streamlit_mvp_v3_9_result.xlsx",
+        file_name="v17_streamlit_mvp_v3_10_result.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
     st.download_button(
         label="Download settlement table as CSV",
         data=settlement_df.to_csv(index=False).encode("utf-8-sig"),
-        file_name="v17_streamlit_mvp_v3_9_settlement.csv",
+        file_name="v17_streamlit_mvp_v3_10_settlement.csv",
         mime="text/csv",
     )
